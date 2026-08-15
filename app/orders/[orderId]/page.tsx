@@ -1,11 +1,14 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { HandoverCode } from "@/components/delivery/handover-code";
 import { OrderCancelButton } from "@/components/orders/order-cancel-button";
 import { Card } from "@/components/ui/card";
 import { getActor } from "@/lib/auth/session";
+import { listDeliveriesForStudentOrder } from "@/lib/delivery/delivery-service";
 import { formatKobo } from "@/lib/money";
 import { getOrderForStudent } from "@/lib/orders/order-service";
+
 
 /**
  * One invoice (PRD §26).
@@ -26,6 +29,11 @@ export default async function OrderPage({ params }: { params: Promise<{ orderId:
   } catch {
     notFound();
   }
+
+  // Ownership was already proven by the call above; this one re-checks it anyway,
+  // because a service that trusts its caller stops being a security boundary.
+  const deliveries = await listDeliveriesForStudentOrder(actor, order.id);
+
 
   return (
     <section className="space-y-4">
@@ -88,7 +96,49 @@ export default async function OrderPage({ params }: { params: Promise<{ orderId:
         </p>
       </Card>
 
+      {deliveries.length > 0 ? (
+        <Card>
+          <h2 className="font-medium">Delivery</h2>
+          <ul className="mt-3 space-y-4">
+            {deliveries.map((delivery) => (
+              <li key={delivery.id} className="space-y-2">
+                <p className="text-sm">
+                  {delivery.pickupName} —{" "}
+                  <span className="opacity-70">
+                    {delivery.status.toLowerCase().replace(/_/g, " ")}
+                  </span>
+                </p>
+                {delivery.agentName ? (
+                  <p className="text-sm opacity-70">
+                    Agent {delivery.agentName}
+                    {delivery.agentPhone ? ` · ${delivery.agentPhone}` : null}
+                  </p>
+                ) : null}
+
+                {/*
+                  The code only makes sense while someone is standing there with
+                  the package, so it is offered from arrival until the hand-over
+                  is confirmed (PRD §45).
+                */}
+                {delivery.status === "ARRIVED" || delivery.status === "AWAITING_OTP" ? (
+                  <HandoverCode deliveryId={delivery.id} pickupName={delivery.pickupName} />
+                ) : null}
+
+                {delivery.status === "PAYMENT_PENDING" && delivery.goodsPaymentDeadline ? (
+                  <p className="text-sm">
+                    Package received. Pay for your goods by{" "}
+                    {delivery.goodsPaymentDeadline.toLocaleTimeString("en-NG")} or they go back to
+                    the store.
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
+
       {order.status === "AWAITING_DELIVERY_PAYMENT" ? (
+
         <Card>
           <p className="text-sm">
             Paying the delivery fee is the next step; that comes with payments (Phase 8). Until then

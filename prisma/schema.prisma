@@ -155,9 +155,18 @@ enum DeliveryEventType {
   IN_TRANSIT
   ARRIVED
   STUDENT_UNAVAILABLE
+  /// Phase 7: the student asked for a hand-over code; any previous one died.
+  OTP_ISSUED
+  /// Phase 7: the agent typed a wrong code. Kept so a pattern is provable.
+  OTP_FAILED
+  OTP_VERIFIED
+  /// Phase 7: the goods-payment window closed unpaid, so the goods went back.
+  PAYMENT_TIMED_OUT
+  COMPLETED
   RETURNED
   CANCELLED
 }
+
 
 // ---------------------------------------------------------------------------
 // Campus (multi-campus from the first migration — PRD Part D)
@@ -1071,7 +1080,26 @@ model Delivery {
   /// arrivedAt + campus studentWaitMinutes (PRD §44).
   waitDeadline DateTime?
 
+  // Hand-over code (PRD §45–46, Phase 7) ---------------------------------
+  /// HMAC of the current code, never the code itself: the plaintext is shown to
+  /// the student once, at the moment it is issued, and is not recoverable.
+  otpHash        String?
+  otpIssuedAt    DateTime?
+  /// otpIssuedAt + OTP_VALIDITY_MINUTES (platform policy, see lib/delivery/otp).
+  otpExpiresAt   DateTime?
+  /// Wrong tries against the current code. Reset when a new code is issued.
+  otpAttempts    Int       @default(0)
+  /// How many codes this delivery has needed, kept for support and abuse review.
+  otpIssueCount  Int       @default(0)
+  otpVerifiedAt  DateTime?
+
+  // Goods payment (PRD §46, Phase 7 sets the window, Phase 8 settles it) --
+  /// otpVerifiedAt + campus goodsPaymentWindowMinutes. The server compares it;
+  /// letting it pass unpaid returns the goods to the vendor.
+  goodsPaymentDeadline DateTime?
+
   completedAt    DateTime?
+
   returnedAt     DateTime?
   cancelledAt    DateTime?
   /// Why the delivery ended the way it did, shown to student and vendor.
@@ -1095,6 +1123,9 @@ model Delivery {
   @@index([agentUserId, status])
   @@index([status, pickupDeadline])
   @@index([status, waitDeadline])
+  /// The goods-payment timeout sweep (Phase 7).
+  @@index([status, goodsPaymentDeadline])
+
 }
 
 /// One immutable entry in a delivery's history (PRD §42).

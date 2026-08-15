@@ -66,7 +66,24 @@ export const deliveryCancelSchema = z.object({
 });
 export type DeliveryCancelInput = z.infer<typeof deliveryCancelSchema>;
 
+/**
+ * The code an agent types at the door (PRD §45).
+ *
+ * Spaces and dashes are stripped before length is judged, because a student
+ * reading "482 917" aloud should not fail on punctuation. Nothing else about the
+ * hand-over is a client input: the code itself is issued by the server, and the
+ * payment window it opens is computed from campus settings.
+ */
+export const handoverVerifySchema = z.object({
+  code: z
+    .string()
+    .transform((value) => value.replace(/\D/g, ""))
+    .refine((value) => /^\d{6}$/.test(value), "Enter the 6-digit code the student is showing you"),
+});
+export type HandoverVerifyInput = z.infer<typeof handoverVerifySchema>;
+
 /** The student never came to collect (PRD §44). */
+
 export const deliveryUnavailableSchema = z.object({
   note: z.string().trim().max(300).optional(),
 });

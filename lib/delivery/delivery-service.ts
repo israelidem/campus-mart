@@ -9,10 +9,30 @@ import {
   escalationForCancellations,
   isPastDeadline,
 } from "@/lib/delivery/rules";
-import { ConflictError, ForbiddenError, NotFoundError, StateConflictError } from "@/lib/errors";
+import {
+  attemptsRemaining,
+  checkOtpUsable,
+  generateHandoverCode,
+  hashHandoverCode,
+  hashesMatch,
+  OTP_VALIDITY_MINUTES,
+} from "@/lib/delivery/otp";
+import { env } from "@/lib/env";
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  StateConflictError,
+  ValidationError,
+} from "@/lib/errors";
 import type { DeliveryEventType, DeliveryStatus } from "@/lib/generated/prisma/enums";
 import { logger } from "@/lib/logger";
-import type { DeliveryCancelInput, DeliveryProgressInput } from "@/validations/delivery";
+import type {
+  DeliveryCancelInput,
+  DeliveryProgressInput,
+  HandoverVerifyInput,
+} from "@/validations/delivery";
+
 
 /**
  * The delivery engine (PRD §36–44).
@@ -136,18 +156,28 @@ async function recordEvent(
 async function campusTimers(
   tx: PrismaTransactionClient,
   campusId: string,
-): Promise<{ pickupWindowMinutes: number; studentWaitMinutes: number }> {
+): Promise<{
+  pickupWindowMinutes: number;
+  studentWaitMinutes: number;
+  goodsPaymentWindowMinutes: number;
+}> {
   const settings = await tx.campusSettings.findUnique({
     where: { campusId },
-    select: { pickupWindowMinutes: true, studentWaitMinutes: true },
+    select: {
+      pickupWindowMinutes: true,
+      studentWaitMinutes: true,
+      goodsPaymentWindowMinutes: true,
+    },
   });
   // Every campus is created with settings; the fallback exists so a missing row
   // degrades to the PRD defaults instead of an unbounded window.
   return {
     pickupWindowMinutes: settings?.pickupWindowMinutes ?? 15,
     studentWaitMinutes: settings?.studentWaitMinutes ?? 10,
+    goodsPaymentWindowMinutes: settings?.goodsPaymentWindowMinutes ?? 10,
   };
 }
+
 
 /**
  * Create the delivery for a vendor order the vendor has just marked ready.
@@ -706,7 +736,8 @@ export async function reportStudentUnavailable(
       actorRole: actor.role,
     });
 
-    await returnVendorOrderToStock(tx, existing.vendorOrderId, actor, note);
+    await returnVendorOrderToStock(tx, existing.vendorOrderId, actor.userId, note);
+
 
     await recordAudit(
       {
@@ -732,13 +763,17 @@ export async function reportStudentUnavailable(
  * Every unit that leaves or re-enters stock is written as an
  * `InventoryTransaction` in the same transaction as the movement itself, so the
  * level always reconciles with its history (PRD §22).
+ *
+ * `actorId` is nullable because the same routine serves a human decision (an
+ * agent reporting an absent student) and a timeout sweep, which has no actor.
  */
 async function returnVendorOrderToStock(
   tx: PrismaTransactionClient,
   vendorOrderId: string,
-  actor: Actor,
+  actorId: string | null,
   reason: string,
 ): Promise<void> {
+
   const vendorOrder = await tx.vendorOrder.findUnique({
     where: { id: vendorOrderId },
     select: {
@@ -777,7 +812,8 @@ async function returnVendorOrderToStock(
         delta: item.quantity,
         resultingStock: restored.stockQuantity,
         note: `Returned from order ${vendorOrder.orderId}: ${reason}`,
-        actorId: actor.userId,
+        actorId,
+
       },
     });
   }
@@ -874,8 +910,11 @@ export async function listDeliveriesForStudentOrder(
     agentName: string | null;
     agentPhone: string | null;
     waitDeadline: Date | null;
+    /** Set once the code is verified: how long is left to pay for the goods. */
+    goodsPaymentDeadline: Date | null;
   }[]
 > {
+
   const order = await prisma.order.findFirst({
     where: { id: orderId, studentId: actor.userId, campusId: actor.campusId ?? undefined },
     select: { id: true },
@@ -890,7 +929,9 @@ export async function listDeliveriesForStudentOrder(
       status: true,
       pickupName: true,
       waitDeadline: true,
+      goodsPaymentDeadline: true,
       agent: { select: { name: true } },
+
       agentProfile: { select: { phone: true } },
     },
   });
@@ -902,5 +943,404 @@ export async function listDeliveriesForStudentOrder(
     agentName: row.agent?.name ?? null,
     agentPhone: row.agentProfile?.phone ?? null,
     waitDeadline: row.waitDeadline,
+    goodsPaymentDeadline: row.goodsPaymentDeadline,
   }));
 }
+
+// ---------------------------------------------------------------------------
+// Hand-over code and goods payment (PRD §45–46, Phase 7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Issue the hand-over code to the student standing in front of the agent
+ * (PRD §45).
+ *
+ * The student asks for it, not the agent: the code is the student's proof that
+ * they received their own package, and an agent able to mint it could release
+ * payment for goods they never handed over. The plaintext is returned exactly
+ * once, in this response, and only its HMAC is stored — so asking again does not
+ * re-reveal the old code, it replaces it, which also invalidates a code that was
+ * read out to the wrong person.
+ */
+export async function issueHandoverCode(
+  actor: Actor,
+  deliveryId: string,
+): Promise<{ code: string; expiresAt: Date; goodsPaymentWindowMinutes: number }> {
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.delivery.findFirst({
+      // Ownership is in the query: the delivery must belong to an order this
+      // student placed, on this campus (Rule 25).
+      where: {
+        id: deliveryId,
+        campusId: actor.campusId ?? undefined,
+        vendorOrder: { order: { studentId: actor.userId } },
+      },
+      select: { id: true, campusId: true, status: true, otpIssueCount: true },
+    });
+    if (!existing) throw new NotFoundError("Delivery not found");
+
+    if (existing.status !== "ARRIVED" && existing.status !== "AWAITING_OTP") {
+      throw new StateConflictError(
+        "Your code appears once the agent has arrived with your package",
+      );
+    }
+
+    const now = new Date();
+    const expiresAt = deadlineFrom(now, OTP_VALIDITY_MINUTES);
+    const code = generateHandoverCode();
+
+    const { goodsPaymentWindowMinutes } = await campusTimers(tx, existing.campusId);
+
+    await tx.delivery.update({
+      where: { id: existing.id },
+      data: {
+        status: "AWAITING_OTP",
+        otpHash: hashHandoverCode({
+          code,
+          deliveryId: existing.id,
+          secret: env().BETTER_AUTH_SECRET,
+        }),
+
+        otpIssuedAt: now,
+        otpExpiresAt: expiresAt,
+        // A new code starts with a clean slate of attempts, so a locked-out
+        // agent is unblocked by the student issuing another one.
+        otpAttempts: 0,
+        otpIssueCount: { increment: 1 },
+      },
+    });
+
+    await recordEvent(tx, {
+      deliveryId: existing.id,
+      campusId: existing.campusId,
+      type: "OTP_ISSUED",
+      actorId: actor.userId,
+      actorRole: actor.role,
+    });
+    await recordAudit(
+      {
+        action: AuditAction.DELIVERY_OTP_ISSUED,
+        entityType: "Delivery",
+        entityId: existing.id,
+        actorId: actor.userId,
+        actorRole: actor.role,
+        campusId: existing.campusId,
+        before: { status: existing.status },
+        // Never the code itself: an audit trail is not a place to keep a
+        // credential.
+        after: { status: "AWAITING_OTP", issueCount: existing.otpIssueCount + 1, expiresAt },
+      },
+      tx,
+    );
+
+    return { code, expiresAt, goodsPaymentWindowMinutes };
+  });
+}
+
+/**
+ * The agent types the code the student read out (PRD §45–46).
+ *
+ * A correct code is the hand-over: it moves the delivery to PAYMENT_PENDING and
+ * starts the campus's goods-payment window, which is the only thing that unlocks
+ * payment for the goods. Phase 8 settles that payment; nothing here takes money,
+ * and nothing here trusts a client for the deadline.
+ *
+ * A wrong code costs an attempt and is recorded. After
+ * `MAX_OTP_ATTEMPTS` the code is dead and the student must issue a new one —
+ * that is the brute-force limit, and it deliberately puts the recovery in the
+ * student's hands rather than the agent's.
+ */
+export async function verifyHandoverCode(
+  actor: Actor,
+  deliveryId: string,
+  input: HandoverVerifyInput,
+): Promise<DeliveryView> {
+  const agent = await requireApprovedAgent(actor);
+
+  return prisma.$transaction(async (tx) => {
+    const existing = await tx.delivery.findFirst({
+      where: { id: deliveryId, agentProfileId: agent.id, campusId: agent.campusId },
+      select: {
+        id: true,
+        campusId: true,
+        status: true,
+        otpHash: true,
+        otpExpiresAt: true,
+        otpAttempts: true,
+        otpVerifiedAt: true,
+      },
+    });
+    if (!existing) throw new NotFoundError("Delivery not found");
+
+    if (existing.status !== "AWAITING_OTP") {
+      throw new StateConflictError(
+        "Ask the student to show their hand-over code, then enter it here",
+      );
+    }
+
+    const now = new Date();
+    const usable = checkOtpUsable(
+      {
+        hash: existing.otpHash,
+        expiresAt: existing.otpExpiresAt,
+        attemptCount: existing.otpAttempts,
+        verifiedAt: existing.otpVerifiedAt,
+      },
+      now,
+    );
+    if (!usable.ok) {
+      if (usable.reason === "ALREADY_VERIFIED") {
+        throw new StateConflictError("This hand-over has already been confirmed");
+      }
+      // Expired, locked and never-issued all end the same way for the agent:
+      // the student has to produce a fresh code.
+      throw new StateConflictError("That code is no longer valid. Ask the student for a new one.");
+    }
+
+    const submitted = hashHandoverCode({
+      code: input.code,
+      deliveryId: existing.id,
+      secret: env().BETTER_AUTH_SECRET,
+    });
+
+
+    if (!hashesMatch(submitted, existing.otpHash ?? "")) {
+      const failed = await tx.delivery.update({
+        where: { id: existing.id },
+        data: { otpAttempts: { increment: 1 } },
+        select: { otpAttempts: true },
+      });
+
+      await recordEvent(tx, {
+        deliveryId: existing.id,
+        campusId: existing.campusId,
+        type: "OTP_FAILED",
+        actorId: actor.userId,
+        actorRole: actor.role,
+        note: `Attempt ${failed.otpAttempts}`,
+      });
+      await recordAudit(
+        {
+          action: AuditAction.DELIVERY_OTP_FAILED,
+          entityType: "Delivery",
+          entityId: existing.id,
+          actorId: actor.userId,
+          actorRole: actor.role,
+          campusId: existing.campusId,
+          after: { attempts: failed.otpAttempts },
+        },
+        tx,
+      );
+
+      const left = attemptsRemaining(failed.otpAttempts);
+      throw new ValidationError(
+        left > 0
+          ? `That code is not right. ${left} ${left === 1 ? "try" : "tries"} left.`
+          : "Too many wrong tries. Ask the student to issue a new code.",
+        { attemptsRemaining: left },
+      );
+    }
+
+    const { goodsPaymentWindowMinutes } = await campusTimers(tx, existing.campusId);
+    const goodsPaymentDeadline = deadlineFrom(now, goodsPaymentWindowMinutes);
+
+    await tx.delivery.update({
+      where: { id: existing.id },
+      data: {
+        status: "PAYMENT_PENDING",
+        otpVerifiedAt: now,
+        // Single use: the hash goes as soon as it has done its job.
+        otpHash: null,
+        goodsPaymentDeadline,
+      },
+    });
+
+    await recordEvent(tx, {
+      deliveryId: existing.id,
+      campusId: existing.campusId,
+      type: "OTP_VERIFIED",
+      actorId: actor.userId,
+      actorRole: actor.role,
+    });
+    await recordAudit(
+      {
+        action: AuditAction.DELIVERY_OTP_VERIFIED,
+        entityType: "Delivery",
+        entityId: existing.id,
+        actorId: actor.userId,
+        actorRole: actor.role,
+        campusId: existing.campusId,
+        before: { status: existing.status },
+        after: { status: "PAYMENT_PENDING", goodsPaymentDeadline, goodsPaymentWindowMinutes },
+      },
+      tx,
+    );
+
+    const row = await tx.delivery.findUniqueOrThrow({
+      where: { id: existing.id },
+      select: deliverySelect,
+    });
+    return toView(row, { assigned: true });
+  });
+}
+
+/**
+ * Close a delivery once the goods have been paid for (PRD §46).
+ *
+ * The seam Phase 8 calls from the Paystack webhook, deliberately not a route:
+ * only the payment provider may declare money received (Rule 3). Idempotent,
+ * because a webhook is retried — a delivery that is already COMPLETED returns
+ * quietly instead of failing the retry.
+ */
+export async function completeDeliveryOnGoodsPayment(
+  deliveryId: string,
+  tx?: PrismaTransactionClient,
+): Promise<{ id: string; status: DeliveryStatus }> {
+  const run = async (client: PrismaTransactionClient) => {
+    const existing = await client.delivery.findUnique({
+      where: { id: deliveryId },
+      select: { id: true, campusId: true, status: true, vendorOrderId: true },
+    });
+    if (!existing) throw new NotFoundError("Delivery not found");
+    if (existing.status === "COMPLETED") {
+      return { id: existing.id, status: existing.status };
+    }
+    if (existing.status !== "PAYMENT_PENDING") {
+      throw new StateConflictError(
+        `A delivery that is ${existing.status.toLowerCase()} cannot be completed`,
+      );
+    }
+
+    const now = new Date();
+
+    await client.delivery.update({
+      where: { id: existing.id },
+      data: { status: "COMPLETED", completedAt: now, goodsPaymentDeadline: null },
+    });
+
+    const vendorOrder = await client.vendorOrder.update({
+      where: { id: existing.vendorOrderId },
+      data: { status: "COMPLETED" },
+      select: { orderId: true },
+    });
+
+    // The invoice closes when no slice is still in flight. A multi-vendor order
+    // waits for its last package.
+    const outstanding = await client.vendorOrder.count({
+      where: {
+        orderId: vendorOrder.orderId,
+        status: { notIn: ["COMPLETED", "CANCELLED"] },
+      },
+    });
+    if (outstanding === 0) {
+      await client.order.updateMany({
+        where: { id: vendorOrder.orderId, status: { notIn: ["COMPLETED", "CANCELLED"] } },
+        data: { status: "COMPLETED" },
+      });
+    }
+
+    await recordEvent(client, {
+      deliveryId: existing.id,
+      campusId: existing.campusId,
+      type: "COMPLETED",
+    });
+    await recordAudit(
+      {
+        action: AuditAction.DELIVERY_COMPLETED,
+        entityType: "Delivery",
+        entityId: existing.id,
+        campusId: existing.campusId,
+        before: { status: existing.status },
+        after: { status: "COMPLETED" },
+      },
+      client,
+    );
+
+    return { id: existing.id, status: "COMPLETED" as DeliveryStatus };
+  };
+
+  return tx ? run(tx) : prisma.$transaction(run);
+}
+
+/**
+ * Return the goods when the student never pays for them (PRD §46).
+ *
+ * The mirror image of the pickup sweep: a package handed over but unpaid cannot
+ * sit in limbo, so once the campus's goods-payment window closes the delivery is
+ * returned, the vendor order is cancelled and every reserved unit goes back to
+ * stock as a recorded movement. The delivery fee already paid is not refunded —
+ * the trip happened. Each row runs in its own transaction so one failure does
+ * not block the rest.
+ */
+export async function expireGoodsPayments(options?: {
+  campusId?: string;
+  now?: Date;
+}): Promise<number> {
+  const now = options?.now ?? new Date();
+
+  const stale = await prisma.delivery.findMany({
+    where: {
+      status: "PAYMENT_PENDING",
+      goodsPaymentDeadline: { lte: now },
+      ...(options?.campusId ? { campusId: options.campusId } : {}),
+    },
+    select: { id: true, campusId: true },
+    take: 50,
+  });
+
+  let returned = 0;
+
+  for (const delivery of stale) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        const fresh = await tx.delivery.findUnique({
+          where: { id: delivery.id },
+          select: { status: true, goodsPaymentDeadline: true, vendorOrderId: true },
+        });
+        if (!fresh || fresh.status !== "PAYMENT_PENDING") return;
+        if (!isPastDeadline(fresh.goodsPaymentDeadline, now)) return;
+
+        const note = "Goods were not paid for within the payment window";
+
+        await tx.delivery.update({
+          where: { id: delivery.id },
+          data: { status: "RETURNED", returnedAt: now, resolutionNote: note },
+        });
+
+        await recordEvent(tx, {
+          deliveryId: delivery.id,
+          campusId: delivery.campusId,
+          type: "PAYMENT_TIMED_OUT",
+          note,
+        });
+        await recordEvent(tx, {
+          deliveryId: delivery.id,
+          campusId: delivery.campusId,
+          type: "RETURNED",
+        });
+
+        await returnVendorOrderToStock(tx, fresh.vendorOrderId, null, note);
+
+        await recordAudit(
+          {
+            action: AuditAction.DELIVERY_PAYMENT_TIMED_OUT,
+            entityType: "Delivery",
+            entityId: delivery.id,
+            campusId: delivery.campusId,
+            before: { status: "PAYMENT_PENDING" },
+            after: { status: "RETURNED", note },
+          },
+          tx,
+        );
+
+        returned += 1;
+      });
+    } catch (error) {
+      logger.error("Failed to expire goods payment", { deliveryId: delivery.id, error });
+    }
+  }
+
+  return returned;
+}
+
+

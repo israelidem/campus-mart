@@ -1,6 +1,7 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-15 (end of Phase 6). Written so work can continue on a
+Last updated: 2026-08-15 (end of Phase 7). Written so work can continue on a
+
 
 second machine (or by another developer/agent) without re-reading the whole
 codebase.
@@ -9,7 +10,8 @@ codebase.
 Source of truth for scope: `docs/PRD.docx`. Build order and
 
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-6-report.md`.
+`docs/phase-0-report.md` … `docs/phase-7-report.md`.
+
 
 
 
@@ -26,16 +28,17 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 4 | Marketplace: categories, products, images, inventory ledger, search/filter/sort | Done |
 | 5 | Cart & checkout: multi-vendor cart, master invoice, vendor orders, price snapshots, delivery locations, distance + delivery fee | Done |
 | 6 | Delivery engine: agents, pool, atomic assignment, 15-minute pickup rule, destination lock, cancellations, returns | Done |
-| 7 | Delivery OTP & goods-payment unlock, payment timeout | **Next** |
+| 7 | Delivery hand-over code & goods-payment unlock, payment timeout | Done |
+| 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | **Next** |
 
-| 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | Not started |
 | 9 | Notifications & PWA: manifest, service worker, installability, push | Not started |
 | 10 | Ratings | Not started |
 | 11 | Disputes & refunds | Not started |
 | 12 | Admin analytics | Not started |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 127 tests / 11 files passing.
+Verification at handover: `npm run test` → 143 tests / 12 files passing.
+
 `npm run lint` → clean. `npm run build` → compiles and typechecks with no errors
 (a full Turbopack production build takes several minutes on a laptop; be patient
 rather than assuming it hung).
@@ -211,36 +214,47 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 7 should do next
+## 5. What Phase 8 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-1. Phase 6 stops at `ARRIVED`. Phase 7 owns the hand-over: the student's OTP, the
-   `AWAITING_OTP` state, and the goods-payment unlock that follows a correct code
-   (PRD §45–48). `AWAITING_OTP` and `COMPLETED` already exist in
-   `DELIVERY_TRANSITIONS` (`lib/delivery/rules.ts`) and are unreachable today by
-   design — extend from `ARRIVED` rather than inventing new states.
-2. The OTP is generated, stored hashed and verified **server-side**, against the
-   delivery's own row. Cap attempts and expire it; the agent must never receive
-   the code, only the verdict.
-3. A verified OTP is what unlocks the goods payment. Do not mark anything paid:
-   set the state that allows payment and leave the money to Phase 8's Paystack
-   webhook (`publishDeliveriesForPaidOrder` in `lib/delivery/delivery-service.ts`
-   is the existing example of that seam).
-4. The payment timeout is a server-side deadline in the same shape as
-   `pickupDeadline`/`waitDeadline`: written when the state is entered, compared
-   against the server's clock, swept by a function like `expirePickups`. Reuse
-   `deadlineFrom` / `isPastDeadline` and add the window to `CampusSettings`.
-5. Completing a delivery is also what completes the `VendorOrder`
-   (`IN_DELIVERY → COMPLETED`). Drive it from the delivery side; do not open that
-   transition to vendors in `VENDOR_ORDER_TRANSITIONS`.
-6. Tests: OTP verification and attempt limiting, the unreachability of `COMPLETED`
-   without a verified OTP, and the payment timeout.
+Phases 5–7 deliberately left every money movement unimplemented and put a named
+seam where it belongs. Phase 8 fills those seams with Paystack; it should not need
+to change a single delivery or order state machine.
 
-Acceptance (PRD Phase 7): an arrived delivery cannot complete without the
-student's OTP, a wrong code is rejected and counted, and a verified code unlocks
-the goods payment.
+1. **Two payments, in this order** (PRD §32, §46): the delivery fee on an
+   `AWAITING_DELIVERY_PAYMENT` order, and the goods payment on a delivery in
+   `PAYMENT_PENDING`. Nothing else may be paid for.
+2. **The seams to call, both already written and idempotent:**
+   - `publishDeliveriesForPaidOrder(orderId)` — after the delivery fee clears;
+     moves waiting deliveries into the pool.
+   - `completeDeliveryOnGoodsPayment(deliveryId)` — after the goods payment
+     clears; closes the vendor order and the invoice.
+   Call them **only** from a signature-verified webhook. Neither has a route, and
+   neither should get one.
+3. **Idempotency is the whole game.** Paystack retries. Store a payment/attempt
+   row keyed by the provider reference, mark it processed inside the same
+   transaction as the effect, and make a repeat delivery of the same event a
+   no-op. Never trust an amount, a status or a split from the client — re-verify
+   the transaction against Paystack's API before acting on it.
+4. **Amounts come from the stored order** (`deliveryFeeKobo`, `goodsSubtotalKobo`,
+   per-vendor totals), never from the request. Commission is
+   `DEFAULT_COMMISSION_BPS` unless the campus overrides it; compute it server-side
+   in kobo with `lib/money.ts` and record it.
+5. **Splits**: goods money is split per vendor, and the agent's delivery fee is
+   settled to the agent. Money never rests in a platform wallet (Rule 3).
+6. **Timeouts already exist**: `expireGoodsPayments` returns the goods when the
+   window closes. Phase 8 only needs to make sure a payment that lands *after*
+   the sweep is refunded rather than silently kept.
+7. Tests: idempotent webhook replay, amount/commission arithmetic in kobo,
+   rejection of an unsigned or tampered webhook, and refusal to pay for an order
+   or delivery in the wrong state.
+
+Acceptance (PRD Phase 8): a student pays the delivery fee and the job appears in
+the pool; a student pays for goods after a verified hand-over and the order
+completes; replaying either webhook changes nothing.
+
 
 
 
@@ -264,6 +278,16 @@ the goods payment.
   (Vercel cron) before the pilot.
 - The agent console reflects deadlines only when the page is refreshed; there is
   no live countdown or push. Phase 9 owns that.
+- `expireGoodsPayments` has no trigger at all — unlike `expirePickups` there is no
+  natural read path to hang it off. It needs the same Vercel cron entry, or an
+  unpaid hand-over sits in `PAYMENT_PENDING` indefinitely.
+- The hand-over code is shown in the issuing response and never again. There is
+  no "resend" that keeps the old code, by design; if a student loses it they must
+  issue a new one, which invalidates the previous code.
+- Nothing yet takes the goods payment, so a delivery that reaches
+  `PAYMENT_PENDING` can only leave it by timing out. That is Phase 8's job and is
+  the reason `completeDeliveryOnGoodsPayment` currently has no caller.
+
 
 - Ratings are absent by design until Phase 10, so the marketplace has no
   "sort by rating" option and no rating filter. Add both with Phase 10 rather than

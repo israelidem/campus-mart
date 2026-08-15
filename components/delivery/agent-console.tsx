@@ -3,7 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { HandoverVerify } from "@/components/delivery/handover-verify";
 import { ApiClientError, apiPatch, apiPost } from "@/lib/api/client";
+
 import { formatKobo } from "@/lib/money";
 
 /**
@@ -222,6 +224,25 @@ export function AgentConsole({
                   {delivery.status === "ARRIVED" && waitLeft ? (
                     <p className="mt-1 text-sm font-medium">Student has {waitLeft}</p>
                   ) : null}
+
+                  {/*
+                    The hand-over itself (PRD §45). The box appears from arrival
+                    onwards: the agent asks the student to generate the code, and
+                    typing it is what completes the delivery.
+                  */}
+                  {delivery.status === "ARRIVED" || delivery.status === "AWAITING_OTP" ? (
+                    <div className="mt-3">
+                      <HandoverVerify deliveryId={delivery.id} />
+                    </div>
+                  ) : null}
+
+                  {delivery.status === "PAYMENT_PENDING" ? (
+                    <p className="mt-2 text-sm">
+                      Handed over. The student is paying for their goods — you are free to take the
+                      next delivery.
+                    </p>
+                  ) : null}
+
 
                   <div className="mt-3 flex flex-wrap gap-2">
                     {step ? (
