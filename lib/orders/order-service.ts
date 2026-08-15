@@ -2,7 +2,9 @@ import { AuditAction, recordAudit } from "@/lib/audit/audit-log";
 import type { Actor } from "@/lib/auth/session";
 import { assertSameCampus } from "@/lib/authorization/campus";
 import { prisma } from "@/lib/db/prisma";
+import { createDeliveryForVendorOrder } from "@/lib/delivery/delivery-service";
 import { distanceBetween, quoteDeliveryFee } from "@/lib/delivery/pricing";
+
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "@/lib/errors";
 import { applyBasisPoints, multiplyKobo, sumKobo, type Kobo } from "@/lib/money";
 import { requireVerifiedStudent } from "@/lib/orders/cart-service";
@@ -478,7 +480,11 @@ export async function listVendorOrders(
 const VENDOR_ORDER_TRANSITIONS: Record<string, readonly string[]> = {
   PLACED: ["PREPARING"],
   PREPARING: ["READY_FOR_PICKUP"],
+  // Beyond this point the delivery engine drives the slice: an agent collecting
+  // the package moves it to IN_DELIVERY (Phase 6), and payment completes it
+  // (Phase 8). The vendor has no further button to press.
   READY_FOR_PICKUP: [],
+  IN_DELIVERY: [],
   COMPLETED: [],
   CANCELLED: [],
 };
@@ -509,6 +515,14 @@ export async function updateVendorOrderStatus(
       data: { status: input.status },
       select: { id: true, status: true },
     });
+
+    // Marking a package ready is what creates its delivery, in the same
+    // transaction: a vendor order can never be ready without a delivery record,
+    // and the delivery decides for itself whether the fee is settled enough to
+    // enter the pool (PRD §32, §37).
+    if (input.status === "READY_FOR_PICKUP") {
+      await createDeliveryForVendorOrder(tx, updated.id, actor);
+    }
 
     await recordAudit(
       {

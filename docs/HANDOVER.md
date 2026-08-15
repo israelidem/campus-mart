@@ -1,6 +1,7 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-15 (end of Phase 5). Written so work can continue on a
+Last updated: 2026-08-15 (end of Phase 6). Written so work can continue on a
+
 second machine (or by another developer/agent) without re-reading the whole
 codebase.
 
@@ -8,7 +9,8 @@ codebase.
 Source of truth for scope: `docs/PRD.docx`. Build order and
 
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-5-report.md`.
+`docs/phase-0-report.md` … `docs/phase-6-report.md`.
+
 
 
 ---
@@ -23,8 +25,9 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 3 | Vendor system: application, storefront/identity uploads, admin review queue, suspend/reinstate, store profile, operating hours, student-vendor toggle, marketplace exposure | Done |
 | 4 | Marketplace: categories, products, images, inventory ledger, search/filter/sort | Done |
 | 5 | Cart & checkout: multi-vendor cart, master invoice, vendor orders, price snapshots, delivery locations, distance + delivery fee | Done |
-| 6 | Delivery engine: pool, atomic assignment, 15-minute pickup rule, destination lock, cancellations, returns | **Next** |
-| 7 | Delivery OTP & goods-payment unlock, payment timeout | Not started |
+| 6 | Delivery engine: agents, pool, atomic assignment, 15-minute pickup rule, destination lock, cancellations, returns | Done |
+| 7 | Delivery OTP & goods-payment unlock, payment timeout | **Next** |
+
 | 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | Not started |
 | 9 | Notifications & PWA: manifest, service worker, installability, push | Not started |
 | 10 | Ratings | Not started |
@@ -32,9 +35,11 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 12 | Admin analytics | Not started |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 110 tests / 10 files passing.
-`npm run lint` → clean. `npm run build` → compiles, typechecks and collects 62
-routes with no errors.
+Verification at handover: `npm run test` → 127 tests / 11 files passing.
+`npm run lint` → clean. `npm run build` → compiles and typechecks with no errors
+(a full Turbopack production build takes several minutes on a laptop; be patient
+rather than assuming it hung).
+
 
 All migrations are applied to the Neon database (`npx prisma migrate status`
 
@@ -165,7 +170,9 @@ app/                 route handlers + pages, grouped by role
   vendor/            store (apply + manage), products, orders
   marketplace/       browse + product detail            (students)
   cart/, orders/     cart, checkout, invoices           (students)
-  admin/             students, vendors, settings, delivery locations
+  agent/             delivery agent console             (students who deliver)
+  admin/             students, vendors, settings, delivery locations, agents
+
   super-admin/       campuses                           (platform owner)
   api/               all mutations; thin wrappers over lib/ services
 lib/
@@ -177,7 +184,8 @@ lib/
   vendors/           vendor service, operating hours
   products/          categories, products, inventory, marketplace query
   orders/            cart view + service, order service, delivery locations
-  delivery/          distance + delivery-fee pricing
+  delivery/          pricing, delivery state machine, agents
+
 
   audit/             audit log writer
   storage/           private document storage (R2 / local fallback)
@@ -203,34 +211,37 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 6 should do next
+## 5. What Phase 7 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-1. Schema: `DeliveryAgentProfile`, `Delivery` (one per `Order`), and a
-   `DeliveryEvent` log. Every one carries `campusId`. The delivery pool is the set
-   of paid, unassigned deliveries on a campus.
-2. Assignment must be **atomic**: claim with a conditional update
-   (`updateMany where { status: 'POOLED', agentId: null }`) exactly as checkout
-   reserves stock, so two agents accepting the same delivery cannot both win.
-3. The 15-minute pickup rule, destination lock and repeated-cancellation
-   suspension (Rule 27) are all state-machine operations in
-   `lib/delivery/delivery-service.ts` — named transitions that re-read and assert
-   the current state, never a status write.
-4. `VendorOrder` currently stops at `READY_FOR_PICKUP` by design. Phase 6 owns
-   handover and `COMPLETED`; extend `VENDOR_ORDER_TRANSITIONS` in
-   `lib/orders/order-service.ts` from the delivery side rather than opening those
-   states to vendors.
-5. Deliveries only enter the pool once the delivery fee is paid. Payment is
-   Phase 8, so gate on `Order.status` and leave a single seam for it — do not
-   simulate a payment.
-6. Tests: atomic claim under contention, the pickup timeout, destination lock, and
-   the cancellation counter.
+1. Phase 6 stops at `ARRIVED`. Phase 7 owns the hand-over: the student's OTP, the
+   `AWAITING_OTP` state, and the goods-payment unlock that follows a correct code
+   (PRD §45–48). `AWAITING_OTP` and `COMPLETED` already exist in
+   `DELIVERY_TRANSITIONS` (`lib/delivery/rules.ts`) and are unreachable today by
+   design — extend from `ARRIVED` rather than inventing new states.
+2. The OTP is generated, stored hashed and verified **server-side**, against the
+   delivery's own row. Cap attempts and expire it; the agent must never receive
+   the code, only the verdict.
+3. A verified OTP is what unlocks the goods payment. Do not mark anything paid:
+   set the state that allows payment and leave the money to Phase 8's Paystack
+   webhook (`publishDeliveriesForPaidOrder` in `lib/delivery/delivery-service.ts`
+   is the existing example of that seam).
+4. The payment timeout is a server-side deadline in the same shape as
+   `pickupDeadline`/`waitDeadline`: written when the state is entered, compared
+   against the server's clock, swept by a function like `expirePickups`. Reuse
+   `deadlineFrom` / `isPastDeadline` and add the window to `CampusSettings`.
+5. Completing a delivery is also what completes the `VendorOrder`
+   (`IN_DELIVERY → COMPLETED`). Drive it from the delivery side; do not open that
+   transition to vendors in `VENDOR_ORDER_TRANSITIONS`.
+6. Tests: OTP verification and attempt limiting, the unreachability of `COMPLETED`
+   without a verified OTP, and the payment timeout.
 
-Acceptance (PRD Phase 6): a paid order appears in exactly one campus pool, one
-agent can claim it, a second agent cannot, and a missed pickup returns it to the
-pool.
+Acceptance (PRD Phase 7): an arrived delivery cannot complete without the
+student's OTP, a wrong code is rejected and counted, and a verified code unlocks
+the goods payment.
+
 
 
 
@@ -240,11 +251,20 @@ pool.
   authorization is correct (owner or same-campus admin) but the path should be
   renamed to `/api/documents/[documentId]`.
 - Vendor suspension blocks new sales (`requireApprovedVendor` gates cart adds and
-  checkout) but does not touch orders already placed. Deciding what happens to an
-  in-flight `VendorOrder` when its store is suspended belongs with Phase 6.
-- Repeated-cancellation suspension (Rule 27) needs the delivery engine (Phase 6).
-  `Order.cancelledAt`/`cancellationReason` are already written, so the counter has
-  data to work from.
+  checkout) but does not touch orders already placed, and a suspended store's
+  in-flight deliveries stay in the pool. Still undecided.
+- Agent suspension is the same shape: an agent suspended mid-trip keeps the
+  delivery they are carrying. Cancelling it for them would need the return path,
+  which exists (`reportStudentUnavailable`) but is written for an absent student.
+- Rule 27 escalates on cancellation count only, and the count never decays. If
+  agents are punished for a bad week, give it a window (cancellations in the last
+  N days) — the `DeliveryEvent` rows already carry the timestamps to do it.
+- `expirePickups` is called opportunistically from `listPool`, so a campus with no
+  agents reading the pool never expires anything. Wire it to a scheduler
+  (Vercel cron) before the pilot.
+- The agent console reflects deadlines only when the page is refreshed; there is
+  no live countdown or push. Phase 9 owns that.
+
 - Ratings are absent by design until Phase 10, so the marketplace has no
   "sort by rating" option and no rating filter. Add both with Phase 10 rather than
   shipping a placeholder.

@@ -105,8 +105,57 @@ enum VendorOrderStatus {
   PREPARING
   /// Package is ready for an agent to collect.
   READY_FOR_PICKUP
+  /// An agent has the package and is on the way.
+  IN_DELIVERY
   /// Handed to the student and paid for.
   COMPLETED
+  CANCELLED
+}
+
+/// Lifecycle of one vendor order's delivery (PRD §37).
+///
+/// A delivery is created when the vendor marks the package ready, but it is only
+/// offered to agents once the delivery fee has been paid (PRD §32) — hence the
+/// waiting state. AWAITING_OTP, PAYMENT_PENDING and COMPLETED are declared here
+/// so the lifecycle is complete in one place; no Phase 6 transition reaches them,
+/// they belong to the OTP (Phase 7) and payment (Phase 8) work.
+enum DeliveryStatus {
+  /// Ready, but the delivery fee is not settled, so the pool must not show it.
+  AWAITING_DELIVERY_PAYMENT
+  /// In the campus pool, visible to eligible agents.
+  AVAILABLE
+  /// Claimed by exactly one agent, who now has a pickup deadline.
+  ACCEPTED
+  /// Collected from the vendor.
+  PICKED_UP
+  IN_TRANSIT
+  /// At the destination, waiting for the student.
+  ARRIVED
+  /// Phase 7: agent generated an OTP, student must enter it.
+  AWAITING_OTP
+  /// Phase 8: OTP verified, student owes for the goods.
+  PAYMENT_PENDING
+  COMPLETED
+  /// Student never showed, or payment timed out: goods went back to the vendor.
+  RETURNED
+  CANCELLED
+}
+
+/// One immutable entry in a delivery's history (PRD §42).
+///
+/// The delivery row carries the current state; this carries how it got there,
+/// which is what makes repeated agent cancellations (Rule 27) provable rather
+/// than inferred.
+enum DeliveryEventType {
+  POOLED
+  ACCEPTED
+  PICKUP_EXPIRED
+  AGENT_CANCELLED
+  PICKED_UP
+  IN_TRANSIT
+  ARRIVED
+  STUDENT_UNAVAILABLE
+  RETURNED
   CANCELLED
 }
 
@@ -146,6 +195,9 @@ model Campus {
   orders            Order[]
   vendorOrders      VendorOrder[]
   orderItems        OrderItem[]
+  agents            DeliveryAgentProfile[]
+  deliveries        Delivery[]
+  deliveryEvents    DeliveryEvent[]
 
   @@index([status])
 }
@@ -232,6 +284,10 @@ model User {
   carts             Cart[]                 @relation("CartStudent")
   orders            Order[]                @relation("OrderStudent")
   cancelledOrders   Order[]                @relation("OrderCanceller")
+  agentProfile      DeliveryAgentProfile?  @relation("AgentProfileUser")
+  reviewedAgents    DeliveryAgentProfile[] @relation("AgentProfileReviewer")
+  deliveries        Delivery[]             @relation("DeliveryAgent")
+  deliveryEvents    DeliveryEvent[]        @relation("DeliveryEventActor")
 
   @@index([campusId, role])
   @@index([role])
@@ -706,7 +762,8 @@ model DeliveryLocation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  orders Order[]
+  orders     Order[]
+  deliveries Delivery[]
 
   @@unique([campusId, slug])
   @@index([campusId, isActive])
@@ -857,7 +914,8 @@ model VendorOrder {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  items OrderItem[]
+  items    OrderItem[]
+  delivery Delivery?
 
   /// A vendor appears at most once per invoice; a second item from the same
   /// store joins the existing slice.
@@ -898,4 +956,168 @@ model OrderItem {
   @@index([vendorOrderId])
   @@index([productId])
   @@index([campusId])
+}
+
+// ---------------------------------------------------------------------------
+// Delivery engine (PRD §36–44, Phase 6)
+// ---------------------------------------------------------------------------
+
+/// A student cleared to carry deliveries on one campus (PRD §36).
+///
+/// Separate from `VendorProfile` and `StudentProfile` because agency is a third
+/// capability with its own review and its own suspension: a suspended agent is
+/// still a student who may keep buying. `cancellationCount` is a counter rather
+/// than a derived query so the escalation in Rule 27 can be enforced inside the
+/// same transaction that records the cancellation.
+model DeliveryAgentProfile {
+  id String @id @default(cuid())
+
+  userId String @unique
+  user   User   @relation("AgentProfileUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  /// Number an assigned student is given to reach the agent.
+  phone String
+
+  status VerificationStatus @default(PENDING_VERIFICATION)
+
+  /// The agent's own switch: off means the pool is not offered to them. An
+  /// agent must be APPROVED *and* on duty to receive work (PRD §38).
+  isOnDuty Boolean @default(false)
+
+  /// Cancellations after acceptance, and the escalation state they drive
+  /// (PRD §42, Rule 27).
+  cancellationCount Int       @default(0)
+  warnedAt          DateTime?
+  underReviewAt     DateTime?
+
+  submittedAt  DateTime?
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?     @relation("AgentProfileReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  /// Reason shown to the agent for a rejection, correction or suspension.
+  reviewNote   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries Delivery[]
+
+  @@index([campusId, status])
+  @@index([campusId, status, isOnDuty])
+  @@index([status, submittedAt])
+}
+
+/// The delivery of one vendor's package (PRD §37).
+///
+/// One per vendor order, not per invoice: each store is a separate pickup, and
+/// two stores may be carried by different agents. The row is the state machine —
+/// every transition is a named operation that re-reads and asserts the current
+/// state, and the deadlines are stored so the server, not a browser timer,
+/// decides when a window has closed (PRD §41, §44).
+model Delivery {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  /// One delivery per vendor order, enforced by the database so a double
+  /// "ready for pickup" cannot put the same package in the pool twice.
+  vendorOrderId String      @unique
+  vendorOrder   VendorOrder @relation(fields: [vendorOrderId], references: [id], onDelete: Cascade)
+
+  status DeliveryStatus @default(AWAITING_DELIVERY_PAYMENT)
+
+  /// Snapshots of both ends of the journey, so a renamed store or retired
+  /// location cannot rewrite a delivery an agent already accepted.
+  pickupName      String
+  pickupLocation  String
+  pickupPhone     String
+  destinationName String
+  destinationNote String?
+  studentPhone    String
+
+  /// The destination that locks an agent while they carry this package
+  /// (PRD §43). Restrict, not Cascade: a retired location must not erase a
+  /// delivery.
+  destinationLocationId String
+  destinationLocation   DeliveryLocation @relation(fields: [destinationLocationId], references: [id], onDelete: Restrict)
+
+  /// The whole invoice's delivery fee, copied for display alongside the job.
+  /// The MVP charges one fee per invoice (PRD §29); how it is shared with the
+  /// agent is settled in Phase 8, so nothing here is a payout instruction.
+  orderDeliveryFeeKobo Int
+
+  agentProfileId String?
+  agentProfile   DeliveryAgentProfile? @relation(fields: [agentProfileId], references: [id], onDelete: SetNull)
+  /// Denormalised for "my deliveries" reads and for audit entries.
+  agentUserId    String?
+  agent          User?                 @relation("DeliveryAgent", fields: [agentUserId], references: [id], onDelete: SetNull)
+
+  /// Set when the fee is settled and the job enters the pool.
+  pooledAt DateTime?
+
+  acceptedAt     DateTime?
+  /// acceptedAt + campus pickupWindowMinutes. The server enforces it; the
+  /// frontend countdown is decoration (PRD §41).
+  pickupDeadline DateTime?
+
+  pickedUpAt  DateTime?
+  inTransitAt DateTime?
+
+  arrivedAt    DateTime?
+  /// arrivedAt + campus studentWaitMinutes (PRD §44).
+  waitDeadline DateTime?
+
+  completedAt    DateTime?
+  returnedAt     DateTime?
+  cancelledAt    DateTime?
+  /// Why the delivery ended the way it did, shown to student and vendor.
+  resolutionNote String?
+
+  /// How many times this package has been offered to the pool. A pickup
+  /// expiry or an agent cancellation raises it, which is what makes a
+  /// repeatedly abandoned job visible to an admin.
+  offerCount Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events DeliveryEvent[]
+
+  /// The pool query: available jobs on a campus, optionally narrowed to the
+  /// destination an agent is already locked to.
+  @@index([campusId, status])
+  @@index([campusId, status, destinationLocationId])
+  @@index([agentProfileId, status])
+  @@index([agentUserId, status])
+  @@index([status, pickupDeadline])
+  @@index([status, waitDeadline])
+}
+
+/// One immutable entry in a delivery's history (PRD §42).
+model DeliveryEvent {
+  id String @id @default(cuid())
+
+  deliveryId String
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  type DeliveryEventType
+
+  /// Null for system transitions: expiry sweeps have no human actor.
+  actorId   String?
+  actor     User?     @relation("DeliveryEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorRole UserRole?
+
+  note String?
+
+  createdAt DateTime @default(now())
+
+  @@index([deliveryId, createdAt])
+  @@index([campusId, type, createdAt])
 }
