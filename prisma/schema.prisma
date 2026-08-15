@@ -76,6 +76,39 @@ enum InventoryReason {
   RETURN
 }
 
+/// Lifecycle of a master invoice (PRD §26–28).
+///
+/// A checkout produces one invoice covering every vendor in the cart. The
+/// delivery fee is paid before the delivery is offered to agents (PRD §32), so a
+/// freshly placed order starts in AWAITING_DELIVERY_PAYMENT; Phase 8 moves it on
+/// when Paystack confirms. Phases 6–8 add the delivery and goods-payment states
+/// rather than reusing these.
+enum OrderStatus {
+  /// Placed, stock reserved, waiting for the student to pay the delivery fee.
+  AWAITING_DELIVERY_PAYMENT
+  /// Delivery fee settled; the delivery engine may now offer it to agents.
+  DELIVERY_PAID
+  /// Every vendor order was delivered and paid for.
+  COMPLETED
+  CANCELLED
+}
+
+/// Lifecycle of one vendor's slice of an invoice (PRD §27).
+///
+/// Each vendor prepares and hands over independently, which is why the split is
+/// a row rather than a grouping in the UI. Phase 6 extends this with the
+/// assignment and hand-over states; Phase 5 only needs "placed" and "cancelled".
+enum VendorOrderStatus {
+  /// Awaiting the vendor's acknowledgement; stock is already reserved.
+  PLACED
+  /// Vendor is assembling the package.
+  PREPARING
+  /// Package is ready for an agent to collect.
+  READY_FOR_PICKUP
+  /// Handed to the student and paid for.
+  COMPLETED
+  CANCELLED
+}
 
 // ---------------------------------------------------------------------------
 // Campus (multi-campus from the first migration — PRD Part D)
@@ -97,20 +130,24 @@ model Campus {
   createdAt DateTime     @default(now())
   updatedAt DateTime     @updatedAt
 
-  users           User[]
-  students        StudentProfile[]
-  vendors         VendorProfile[]
-  registryEntries StudentRegistryEntry[]
-  documents       OnboardingDocument[]
-  settings        CampusSettings?
-  categories      Category[]
-  products        Product[]
-  productImages   ProductImage[]
-  inventory       InventoryTransaction[]
-
+  users             User[]
+  students          StudentProfile[]
+  vendors           VendorProfile[]
+  registryEntries   StudentRegistryEntry[]
+  documents         OnboardingDocument[]
+  settings          CampusSettings?
+  categories        Category[]
+  products          Product[]
+  productImages     ProductImage[]
+  inventory         InventoryTransaction[]
+  deliveryLocations DeliveryLocation[]
+  carts             Cart[]
+  cartItems         CartItem[]
+  orders            Order[]
+  vendorOrders      VendorOrder[]
+  orderItems        OrderItem[]
 
   @@index([status])
-
 }
 
 /// Per-campus operational configuration (PRD §18, §29, §35, §47).
@@ -192,7 +229,9 @@ model User {
   uploadedDocuments OnboardingDocument[]   @relation("DocumentUploader")
   importedRegistry  StudentRegistryEntry[] @relation("RegistryImporter")
   inventoryChanges  InventoryTransaction[] @relation("InventoryActor")
-
+  carts             Cart[]                 @relation("CartStudent")
+  orders            Order[]                @relation("OrderStudent")
+  cancelledOrders   Order[]                @relation("OrderCanceller")
 
   @@index([campusId, role])
   @@index([role])
@@ -357,7 +396,6 @@ model OnboardingDocument {
   @@index([vendorProfileId])
 }
 
-
 /// Official student list uploaded by a Campus Admin, used to corroborate
 /// registrations (PRD §16). A registry entry is not an account.
 model StudentRegistryEntry {
@@ -415,11 +453,11 @@ model VendorProfile {
   latitude           Float?
   longitude          Float?
 
-  status       VerificationStatus @default(INCOMPLETE)
+  status        VerificationStatus @default(INCOMPLETE)
   /// True when the applicant is also a verified student of this campus
   /// (PRD §18). Recorded at submission so a later settings change cannot
   /// retroactively invalidate an approved vendor.
-  studentVendor Boolean           @default(false)
+  studentVendor Boolean            @default(false)
 
   /// Vendor's own kill switch for incoming orders, independent of opening
   /// hours (PRD §23). A store is orderable only when APPROVED, accepting
@@ -440,7 +478,7 @@ model VendorProfile {
   operatingHours VendorOperatingHours[]
   products       Product[]
   inventory      InventoryTransaction[]
-
+  vendorOrders   VendorOrder[]
 
   /// Two stores on the same campus cannot share a name (Rule 2 scoping).
   @@unique([campusId, slug])
@@ -539,11 +577,11 @@ model Product {
 
   /// Units in stock. Never negative — enforced by a check constraint and by
   /// every write going through the inventory service.
-  stockQuantity      Int @default(0)
+  stockQuantity     Int     @default(0)
   /// At or below this level the vendor is warned that stock is running out.
-  lowStockThreshold  Int @default(0)
+  lowStockThreshold Int     @default(0)
   /// Free-text unit shown next to the price, e.g. "per plate", "per bottle".
-  unitLabel          String?
+  unitLabel         String?
 
   /// Vendor's per-product switch. A product is buyable only when available, in
   /// stock, not deleted, and its store is APPROVED and open.
@@ -559,8 +597,10 @@ model Product {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  images    ProductImage[]
-  inventory InventoryTransaction[]
+  images     ProductImage[]
+  inventory  InventoryTransaction[]
+  cartItems  CartItem[]
+  orderItems OrderItem[]
 
   /// Two products in the same store cannot share a name.
   @@unique([vendorProfileId, slug])
@@ -614,9 +654,9 @@ model InventoryTransaction {
   vendorProfileId String
   vendorProfile   VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
 
-  reason InventoryReason
+  reason         InventoryReason
   /// Signed change: positive adds stock, negative removes it. Never zero.
-  delta  Int
+  delta          Int
   /// Stock level after this movement was applied.
   resultingStock Int
 
@@ -633,4 +673,229 @@ model InventoryTransaction {
   @@index([vendorProfileId, createdAt])
 }
 
+// ---------------------------------------------------------------------------
+// Cart, checkout and orders (PRD §25–29, Phase 5)
+// ---------------------------------------------------------------------------
 
+/// A place on campus a student may have an order delivered to (PRD §28).
+///
+/// Curated per campus by its admin rather than free-typed by students, because
+/// the delivery fee is computed from the destination's coordinates and an agent
+/// has to find it. The student adds the room/flat detail on the order itself.
+model DeliveryLocation {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  name String
+  /// URL-safe form of the name, unique per campus.
+  slug String
+
+  description String?
+
+  /// Used by the delivery pricing engine. Without coordinates the campus
+  /// falls back to the base fee alone.
+  latitude  Float?
+  longitude Float?
+
+  sortOrder Int     @default(0)
+  /// Retired locations stay referenced by past orders but cannot be chosen.
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+
+  @@unique([campusId, slug])
+  @@index([campusId, isActive])
+}
+
+/// A student's open basket on one campus (PRD §25).
+///
+/// The cart holds no prices. Quantities are the only thing a client may state;
+/// every amount is recomputed from `Product` when the cart is read and again at
+/// checkout, so a stale or tampered client cannot fix a price (Rule 1).
+model Cart {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  studentId String
+  student   User   @relation("CartStudent", fields: [studentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items CartItem[]
+
+  /// One cart per student per campus.
+  @@unique([studentId, campusId])
+  @@index([campusId])
+}
+
+/// One product line in a cart. Items from several vendors may sit side by side;
+/// the split into vendor orders happens at checkout (PRD §27).
+model CartItem {
+  id String @id @default(cuid())
+
+  cartId String
+  cart   Cart   @relation(fields: [cartId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// Always positive. Adding the same product again raises this instead of
+  /// creating a second row.
+  quantity Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([cartId, productId])
+  @@index([campusId])
+  @@index([productId])
+}
+
+/// The master invoice for one checkout (PRD §26).
+///
+/// One invoice covers every vendor in the cart and carries the single delivery
+/// fee, because the student makes one journey's worth of payment no matter how
+/// many stores are involved. All amounts are integer kobo and are computed by
+/// the server at checkout; nothing here is ever taken from the client.
+model Order {
+  id String @id @default(cuid())
+
+  /// Human-readable reference shown to students, vendors and agents.
+  reference String @unique
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  studentId String
+  student   User   @relation("OrderStudent", fields: [studentId], references: [id], onDelete: Restrict)
+
+  status OrderStatus @default(AWAITING_DELIVERY_PAYMENT)
+
+  /// Restrict, not Cascade: a retired location must not erase an order.
+  deliveryLocationId   String
+  deliveryLocation     DeliveryLocation @relation(fields: [deliveryLocationId], references: [id], onDelete: Restrict)
+  /// Snapshot of the location's name, so renaming it later cannot rewrite an
+  /// order the student and agent already agreed on.
+  deliveryLocationName String
+  /// Room, flat or landmark detail typed by the student.
+  deliveryNote         String?
+  /// Number the agent calls on arrival.
+  contactPhone         String
+
+  /// Straight-line distance used for the fee, in metres. Null when either end
+  /// has no coordinates, in which case only the base fee applied.
+  distanceMeters Int?
+
+  /// Sum of every vendor order's goods subtotal.
+  goodsSubtotalKobo Int
+  /// Computed from campus settings and the distance, then clamped to the
+  /// campus minimum/maximum. Paid before the delivery is offered (PRD §32).
+  deliveryFeeKobo   Int
+  /// goodsSubtotalKobo + deliveryFeeKobo, stored so an invoice never has to be
+  /// re-derived to be displayed.
+  totalKobo         Int
+
+  placedAt DateTime @default(now())
+
+  cancelledAt        DateTime?
+  cancelledById      String?
+  cancelledBy        User?     @relation("OrderCanceller", fields: [cancelledById], references: [id], onDelete: SetNull)
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vendorOrders VendorOrder[]
+
+  @@index([campusId, status])
+  @@index([studentId, placedAt])
+  @@index([campusId, placedAt])
+}
+
+/// One vendor's slice of an invoice (PRD §27).
+///
+/// Each vendor sees and fulfils only their own slice, and the commission is
+/// snapshotted here at checkout so a later change to campus settings cannot
+/// alter what an already-placed order owes the platform.
+model VendorOrder {
+  id String @id @default(cuid())
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  vendorProfileId String
+  vendorProfile   VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Restrict)
+
+  status VendorOrderStatus @default(PLACED)
+
+  /// Sum of this vendor's line totals.
+  goodsSubtotalKobo Int
+  /// Commission rate in basis points, copied from campus settings at checkout.
+  commissionBps     Int
+  /// goodsSubtotalKobo × commissionBps ÷ 10 000, rounded half-up in kobo.
+  commissionKobo    Int
+  /// What the vendor is owed once the goods are paid for (Phase 8 settles it).
+  vendorPayoutKobo  Int
+
+  cancelledAt        DateTime?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items OrderItem[]
+
+  /// A vendor appears at most once per invoice; a second item from the same
+  /// store joins the existing slice.
+  @@unique([orderId, vendorProfileId])
+  @@index([vendorProfileId, status])
+  @@index([campusId, status])
+}
+
+/// One purchased line, frozen at checkout (PRD §26).
+///
+/// The product name, unit price and unit label are snapshots: the vendor may
+/// re-price or retire the product afterwards, and none of that may change what
+/// this order says was bought and for how much.
+model OrderItem {
+  id String @id @default(cuid())
+
+  vendorOrderId String
+  vendorOrder   VendorOrder @relation(fields: [vendorOrderId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  /// Restrict: products are soft-deleted precisely so this reference survives.
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  /// Snapshots taken at checkout.
+  productName   String
+  unitLabel     String?
+  unitPriceKobo Int
+
+  quantity      Int
+  /// unitPriceKobo × quantity, stored so a line total cannot drift.
+  lineTotalKobo Int
+
+  createdAt DateTime @default(now())
+
+  @@index([vendorOrderId])
+  @@index([productId])
+  @@index([campusId])
+}

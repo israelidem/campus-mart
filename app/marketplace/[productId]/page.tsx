@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
+import { AddToCartButton } from "@/components/orders/add-to-cart";
 import { Card } from "@/components/ui/card";
 import { getActor } from "@/lib/auth/session";
 import { AppError } from "@/lib/errors";
@@ -83,9 +84,8 @@ export default async function ProductDetailPage({
             </p>
           </Card>
 
-          <p className="text-sm opacity-70">
-            Adding to cart and checkout arrive with the ordering phase.
-          </p>
+          <AddToCartButton productId={productId} inStock={product.inStock} />
+
         </div>
       </div>
     </section>

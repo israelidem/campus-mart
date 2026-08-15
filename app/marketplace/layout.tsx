@@ -12,9 +12,16 @@ export default function MarketplaceLayout({ children }: { children: React.ReactN
           <Link href="/marketplace" className="underline">
             Marketplace
           </Link>
+          <Link href="/cart" className="underline">
+            Cart
+          </Link>
+          <Link href="/orders" className="underline">
+            Orders
+          </Link>
           <Link href="/vendor/store" className="underline">
             Sell
           </Link>
+
         </nav>
       </header>
       <main className="flex-1">{children}</main>

@@ -15,6 +15,10 @@ export default function VendorLayout({ children }: { children: React.ReactNode }
           <Link href="/vendor/products" className="underline">
             Products
           </Link>
+          <Link href="/vendor/orders" className="underline">
+            Orders
+          </Link>
+
           <Link href="/marketplace" className="underline">
             Marketplace
           </Link>

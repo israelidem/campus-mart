@@ -1,6 +1,6 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-15 (end of Phase 4). Written so work can continue on a
+Last updated: 2026-08-15 (end of Phase 5). Written so work can continue on a
 second machine (or by another developer/agent) without re-reading the whole
 codebase.
 
@@ -8,7 +8,7 @@ codebase.
 Source of truth for scope: `docs/PRD.docx`. Build order and
 
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-4-report.md`.
+`docs/phase-0-report.md` … `docs/phase-5-report.md`.
 
 
 ---
@@ -22,9 +22,8 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 2 | Campus management: campuses, campus settings, Campus Admin, Super Admin, server-side campus isolation, audit logging | Done |
 | 3 | Vendor system: application, storefront/identity uploads, admin review queue, suspend/reinstate, store profile, operating hours, student-vendor toggle, marketplace exposure | Done |
 | 4 | Marketplace: categories, products, images, inventory ledger, search/filter/sort | Done |
-| 5 | Cart & checkout: multi-vendor cart, master invoice, vendor orders, price snapshots, delivery locations, distance + delivery fee | **Next** |
-
-| 6 | Delivery engine: pool, atomic assignment, 15-minute pickup rule, destination lock, cancellations, returns | Not started |
+| 5 | Cart & checkout: multi-vendor cart, master invoice, vendor orders, price snapshots, delivery locations, distance + delivery fee | Done |
+| 6 | Delivery engine: pool, atomic assignment, 15-minute pickup rule, destination lock, cancellations, returns | **Next** |
 | 7 | Delivery OTP & goods-payment unlock, payment timeout | Not started |
 | 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | Not started |
 | 9 | Notifications & PWA: manifest, service worker, installability, push | Not started |
@@ -33,12 +32,12 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 12 | Admin analytics | Not started |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 88 tests / 8 files passing.
-`npm run lint` → clean. `npm run build` → compiles, typechecks and collects 49
+Verification at handover: `npm run test` → 110 tests / 10 files passing.
+`npm run lint` → clean. `npm run build` → compiles, typechecks and collects 62
 routes with no errors.
 
+All migrations are applied to the Neon database (`npx prisma migrate status`
 
-All three migrations are applied to the Neon database (`npx prisma migrate status`
 
 clean, `prisma migrate diff --from-config-datasource --to-schema` reports no
 difference), so a second machine pointed at the same database only needs
@@ -133,7 +132,8 @@ Notes
 - `LOG_LEVEL`, `DEFAULT_COMMISSION_BPS`, `MAP_PROVIDER`.
 
 Not needed until their phase: `PAYSTACK_*` (Phase 8), `VAPID_*` (Phase 9),
-`MAP_PROVIDER_API_KEY` (Phase 5 if a real provider replaces `haversine`).
+`MAP_PROVIDER_API_KEY` (only if a real routing provider replaces `haversine` in
+`lib/delivery/pricing.ts`).
 
 Both machines must point at the **same** Neon database, or each will need its own
 campus/admin seed data.
@@ -162,10 +162,10 @@ left in place; seed once, from a machine you control, against the same database.
 app/                 route handlers + pages, grouped by role
   (auth)/            sign-up, sign-in, verify-email
   student/           onboarding
-  vendor/            store (apply + manage), products
+  vendor/            store (apply + manage), products, orders
   marketplace/       browse + product detail            (students)
-
-  admin/             students, vendors, settings        (Campus Admin)
+  cart/, orders/     cart, checkout, invoices           (students)
+  admin/             students, vendors, settings, delivery locations
   super-admin/       campuses                           (platform owner)
   api/               all mutations; thin wrappers over lib/ services
 lib/
@@ -175,6 +175,10 @@ lib/
   campus/            campus + settings service
   students/          student onboarding, registry CSV
   vendors/           vendor service, operating hours
+  products/          categories, products, inventory, marketplace query
+  orders/            cart view + service, order service, delivery locations
+  delivery/          distance + delivery-fee pricing
+
   audit/             audit log writer
   storage/           private document storage (R2 / local fallback)
   db/, money.ts, errors.ts, logger.ts, env.ts
@@ -199,33 +203,35 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 5 should do next
+## 5. What Phase 6 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-1. Schema: `Cart`/`CartItem`, `Order` (the master invoice), `VendorOrder`,
-   `OrderItem`, `DeliveryLocation`. Every one carries `campusId`. Order items must
-   **snapshot** `unitPriceKobo` and the product name at checkout — later price
-   edits must not change a placed order.
-2. Cart: one cart per student per campus, items from several vendors allowed. The
-   cart is split into one `VendorOrder` per vendor at checkout, under a single
-   master invoice.
-3. Reservation: at checkout, decrement stock through the Phase 4 primitive
-   `adjustInventory` (reason `SALE`) inside the same transaction as the order
-   write. `resolveStockChange` plus the `Product_stockQuantity_nonnegative`
-   constraint are what make the "two buyers, one unit" acceptance test pass — do
-   not bypass them with a bare `update`.
-4. Delivery fee: computed server-side only, from campus settings and the distance
-   between the store and the delivery location (`MAP_PROVIDER=haversine` for now).
-   Integer kobo, via `lib/money.ts`.
-5. UI: cart and checkout for students; incoming orders for vendors.
-6. Tests: price snapshot immutability, per-vendor split, fee computation, and
-   stock never going negative under concurrent checkout.
+1. Schema: `DeliveryAgentProfile`, `Delivery` (one per `Order`), and a
+   `DeliveryEvent` log. Every one carries `campusId`. The delivery pool is the set
+   of paid, unassigned deliveries on a campus.
+2. Assignment must be **atomic**: claim with a conditional update
+   (`updateMany where { status: 'POOLED', agentId: null }`) exactly as checkout
+   reserves stock, so two agents accepting the same delivery cannot both win.
+3. The 15-minute pickup rule, destination lock and repeated-cancellation
+   suspension (Rule 27) are all state-machine operations in
+   `lib/delivery/delivery-service.ts` — named transitions that re-read and assert
+   the current state, never a status write.
+4. `VendorOrder` currently stops at `READY_FOR_PICKUP` by design. Phase 6 owns
+   handover and `COMPLETED`; extend `VENDOR_ORDER_TRANSITIONS` in
+   `lib/orders/order-service.ts` from the delivery side rather than opening those
+   states to vendors.
+5. Deliveries only enter the pool once the delivery fee is paid. Payment is
+   Phase 8, so gate on `Order.status` and leave a single seam for it — do not
+   simulate a payment.
+6. Tests: atomic claim under contention, the pickup timeout, destination lock, and
+   the cancellation counter.
 
-Acceptance (PRD Phase 5): a student can check out a multi-vendor cart and get one
-invoice with one delivery fee and correct per-vendor totals; a second buyer cannot
-take stock that no longer exists.
+Acceptance (PRD Phase 6): a paid order appears in exactly one campus pool, one
+agent can claim it, a second agent cannot, and a missed pickup returns it to the
+pool.
+
 
 
 ## 6. Known gaps and debts
@@ -233,17 +239,25 @@ take stock that no longer exists.
 - Vendor evidence is served by `/api/students/documents/[documentId]`. The
   authorization is correct (owner or same-campus admin) but the path should be
   renamed to `/api/documents/[documentId]`.
-- Vendor suspension does not cancel in-flight work — there are no orders yet.
-  `requireApprovedVendor` is the hook Phases 5–6 must call.
+- Vendor suspension blocks new sales (`requireApprovedVendor` gates cart adds and
+  checkout) but does not touch orders already placed. Deciding what happens to an
+  in-flight `VendorOrder` when its store is suspended belongs with Phase 6.
 - Repeated-cancellation suspension (Rule 27) needs the delivery engine (Phase 6).
+  `Order.cancelledAt`/`cancellationReason` are already written, so the counter has
+  data to work from.
 - Ratings are absent by design until Phase 10, so the marketplace has no
   "sort by rating" option and no rating filter. Add both with Phase 10 rather than
   shipping a placeholder.
 - Product images are stored privately and streamed by
   `/api/products/images/[imageId]`, which means no CDN caching for listing photos.
   Revisit in Phase 13 (performance) if browse latency matters.
-- `soldCount` on `Product` powers "most popular" but nothing increments it yet;
-  Phase 5's checkout must, in the same transaction as the `SALE` ledger row.
+- `soldCount` on `Product` is incremented at checkout and decremented when an
+  unpaid order is cancelled, so "most popular" counts placed orders, not delivered
+  ones. Revisit if that proves misleading once deliveries exist.
+- The delivery fee is `0` when either the campus or the chosen location has no
+  coordinates — the fee formula cannot invent a distance. Campus Admins should be
+  told to set coordinates before the pilot.
+
 - Marketplace search uses `contains` with `mode: "insensitive"`. Adequate for the
   ABUAD pilot; Phase 13 should consider Postgres full-text search or a trigram
   index if catalogues grow.
