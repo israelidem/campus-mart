@@ -56,8 +56,51 @@ npm install
 copy .env.example .env          # Windows;  cp .env.example .env  elsewhere
 # fill in the values in section 3
 npx prisma migrate deploy       # or: npx prisma migrate dev
+npm run db:seed                 # see "First launch" below — only needed once
 npm run dev                     # http://localhost:3000
 ```
+
+### First launch (bootstrap)
+
+An empty database cannot be entered through the UI, by design:
+
+- Sign-up requires an **active campus**, and the campus dropdown is empty.
+- Campuses can only be created by a **Super Admin**.
+- Super Admin is granted by `lib/auth/bootstrap.ts` to an email listed in
+  `SUPER_ADMIN_EMAILS` — but only once that account's **email is verified**.
+- Email delivery is not configured (PRD §53), so the verification link is only
+  written to the server log, which is awkward on a deployed instance.
+
+`prisma/seed.ts` breaks that cycle once, for the platform owner only:
+
+1. Creates the owner's account through Better Auth's `signUpEmail`, so the
+   password is hashed exactly as a normal sign-up would hash it.
+2. Sets `emailVerified` on that one allowlisted address, standing in for the
+   verification click.
+3. Calls the real `ensureSuperAdmin`, so the promotion is audited like any other.
+4. Calls the real `createCampus` as that Super Admin, which also creates the
+   campus settings row.
+
+```bash
+# .env: SUPER_ADMIN_EMAILS=you@example.com
+#       SEED_SUPER_ADMIN_PASSWORD=<strong password, 10+ chars>
+npm run db:seed
+```
+
+Then sign in at `/sign-in` with that email and password. Re-running the seed is
+safe; each step checks for what it would create. Remove
+`SEED_SUPER_ADMIN_PASSWORD` from `.env` afterwards.
+
+From there everything is UI work: `/super-admin/campuses` to add campuses and
+assign a Campus Admin (the person must already have a verified account), then
+students register at `/sign-up`, a Campus Admin verifies them under
+`/admin/students`, vendors apply at `/vendor/store` and are approved under
+`/admin/vendors`, and approved vendors list products at `/vendor/products`.
+
+Note that a student registering normally still needs their email verified. With
+no mail provider, the verification URL appears in the server log
+("Email verification requested"); open it manually in development.
+
 
 Scripts (`package.json`): `dev`, `build` (runs `prisma generate` first), `start`,
 `lint`, `test` (Vitest, run once), `test:watch`.
