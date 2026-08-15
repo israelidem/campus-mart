@@ -1,0 +1,448 @@
+// Campus Mart — Prisma schema
+//
+// Phase 0 (foundation): authentication tables required by Better Auth, the
+// Campus entity that every campus-scoped record will reference, and the audit
+// log. Later phases extend this file (students, vendors, agents, marketplace,
+// orders, deliveries, payments).
+//
+// Conventions
+//  - Money is stored as Int in kobo (see lib/money.ts). Never Float/Decimal-as-float.
+//  - Every campus-scoped entity carries campusId and is indexed on it.
+//  - Uniqueness that protects business rules is enforced at database level.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// A user's active role on the platform. A user has exactly one role; role
+/// changes are audited. Authorization is always derived from this server-side
+/// value, never from client input.
+enum UserRole {
+  STUDENT
+  VENDOR
+  DELIVERY_AGENT
+  CAMPUS_ADMIN
+  SUPER_ADMIN
+}
+
+enum CampusStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// Verification lifecycle shared by student, vendor and agent onboarding.
+enum VerificationStatus {
+  /// Profile created but documents not yet submitted.
+  INCOMPLETE
+  /// Submitted and awaiting Campus Admin review.
+  PENDING_VERIFICATION
+  /// Admin asked for a correction; the applicant may resubmit.
+  CORRECTION_REQUESTED
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+/// Private documents uploaded during onboarding (PRD §56). Objects are stored
+/// privately and only ever served through authorised, signed access.
+enum DocumentType {
+  STUDENT_PASSPORT_PHOTO
+  STUDENT_ID_CARD
+  VENDOR_STOREFRONT
+  VENDOR_IDENTITY
+  AGENT_STUDENT_ID
+  AGENT_FACIAL_VERIFICATION
+}
+
+// ---------------------------------------------------------------------------
+// Campus (multi-campus from the first migration — PRD Part D)
+// ---------------------------------------------------------------------------
+
+model Campus {
+  id        String       @id @default(cuid())
+  /// Short code, e.g. "ABUAD". Unique platform-wide.
+  code      String       @unique
+  name      String
+  city      String
+  state     String?
+  country   String       @default("Nigeria")
+  status    CampusStatus @default(ACTIVE)
+  /// Approximate campus centre, used by the delivery pricing engine.
+  latitude  Float?
+  longitude Float?
+  timezone  String       @default("Africa/Lagos")
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  users           User[]
+  students        StudentProfile[]
+  vendors         VendorProfile[]
+  registryEntries StudentRegistryEntry[]
+  documents       OnboardingDocument[]
+  settings        CampusSettings?
+
+  @@index([status])
+}
+
+/// Per-campus operational configuration (PRD §18, §29, §35, §47).
+///
+/// Every campus has exactly one settings row, created together with the campus
+/// so that no code path has to cope with a campus that has no configuration.
+/// Money fields are integer kobo (PRD §64); the commission is basis points so
+/// that 2.5% is expressible exactly as 250.
+model CampusSettings {
+  id       String @id @default(cuid())
+  campusId String @unique
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  /// Whether students on this campus may apply to become vendors (PRD §18).
+  allowStudentVendors  Boolean @default(false)
+  /// Whether a student's matric number must match the imported registry before
+  /// an admin can approve them.
+  requireRegistryMatch Boolean @default(false)
+
+  // Delivery pricing engine (PRD §29) ------------------------------------
+  deliveryBaseFeeKobo    Int @default(20000)
+  deliveryPerKmKobo      Int @default(10000)
+  deliveryMinimumFeeKobo Int @default(20000)
+  deliveryMaximumFeeKobo Int @default(200000)
+
+  /// Platform commission in basis points. 250 = 2.5% (PRD §35).
+  commissionBps Int @default(250)
+
+  // Delivery state-machine timers (PRD §41, §44, §47) --------------------
+  /// Minutes an agent has to collect a package after accepting it.
+  pickupWindowMinutes       Int @default(15)
+  /// Minutes an agent waits at the destination for an absent student.
+  studentWaitMinutes        Int @default(10)
+  /// Minutes a student has to pay for goods after OTP verification.
+  goodsPaymentWindowMinutes Int @default(10)
+
+  /// Short notice shown to everyone on the campus. Null when there is none.
+  announcement String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Better Auth tables
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String  @id @default(cuid())
+  name          String
+  email         String  @unique
+  emailVerified Boolean @default(false)
+  image         String?
+
+  // Campus Mart additions -----------------------------------------------
+  role  UserRole @default(STUDENT)
+  phone String?
+
+  /// A user belongs to exactly one campus (Rules 1–4). Super Admins have no
+  /// campus and are the only role permitted to query across campuses.
+  campusId String?
+  campus   Campus? @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  /// Set when an admin suspends the account; suspended users cannot transact.
+  suspendedAt     DateTime?
+  suspendedReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions  Session[]
+  accounts  Account[]
+  auditLogs AuditLog[] @relation("AuditLogActor")
+
+  studentProfile    StudentProfile?        @relation("StudentProfileUser")
+  reviewedStudents  StudentProfile[]       @relation("StudentProfileReviewer")
+  vendorProfile     VendorProfile?         @relation("VendorProfileUser")
+  reviewedVendors   VendorProfile[]        @relation("VendorProfileReviewer")
+  uploadedDocuments OnboardingDocument[]   @relation("DocumentUploader")
+  importedRegistry  StudentRegistryEntry[] @relation("RegistryImporter")
+
+  @@index([campusId, role])
+  @@index([role])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  /// Hashed credential password for the email/password provider.
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (PRD §65)
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String    @id @default(cuid())
+  /// Null for system-initiated actions (schedulers, webhooks).
+  actorId    String?
+  actor      User?     @relation("AuditLogActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorRole  UserRole?
+  /// Stable action name, e.g. VENDOR_APPROVED, REFUND_INITIATED.
+  action     String
+  entityType String
+  entityId   String?
+  campusId   String?
+  before     Json?
+  after      Json?
+  ipAddress  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([campusId, createdAt])
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Students (PRD §13–16)
+// ---------------------------------------------------------------------------
+
+/// A student's campus identity and verification state. The profile is separate
+/// from `User` because authentication identity and campus membership have
+/// different lifecycles: a user exists as soon as they register, but only an
+/// approved profile may transact on a campus.
+model StudentProfile {
+  id String @id @default(cuid())
+
+  userId String @unique
+  user   User   @relation("StudentProfileUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  /// Stored normalised (uppercase, trimmed) so uniqueness cannot be bypassed
+  /// with case or spacing variants.
+  matricNumber    String
+  /// Number printed on the physical ID card, when it differs from the matric
+  /// number. Optional, but unique per campus when present.
+  studentIdNumber String?
+
+  department String?
+  level      String?
+
+  status          VerificationStatus @default(INCOMPLETE)
+  /// True when the matric number matched the campus registry at submission.
+  registryMatched Boolean            @default(false)
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
+  reviewedById    String?
+  reviewedBy      User?              @relation("StudentProfileReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  /// Reason shown to the student for a rejection or correction request.
+  reviewNote      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents OnboardingDocument[]
+
+  /// Duplicate-registration protection enforced in the database (PRD §15).
+  @@unique([campusId, matricNumber])
+  @@unique([campusId, studentIdNumber])
+  @@index([campusId, status])
+  @@index([status, submittedAt])
+}
+
+/// Metadata for a privately stored onboarding document. The file itself lives
+/// in object storage; only the key is persisted, and access is always brokered
+/// by the server (PRD §56).
+model OnboardingDocument {
+  id   String       @id @default(cuid())
+  type DocumentType
+
+  /// Object key in private storage. Never a public URL.
+  storageKey String  @unique
+  mimeType   String
+  sizeBytes  Int
+  /// SHA-256 of the uploaded bytes, used to detect re-uploads of the same file.
+  checksum   String?
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  uploadedById String
+  uploadedBy   User   @relation("DocumentUploader", fields: [uploadedById], references: [id], onDelete: Cascade)
+
+  studentProfileId String?
+  studentProfile   StudentProfile? @relation(fields: [studentProfileId], references: [id], onDelete: Cascade)
+
+  vendorProfileId String?
+  vendorProfile   VendorProfile? @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@index([campusId, type])
+  @@index([uploadedById])
+  @@index([studentProfileId])
+  @@index([vendorProfileId])
+}
+
+
+/// Official student list uploaded by a Campus Admin, used to corroborate
+/// registrations (PRD §16). A registry entry is not an account.
+model StudentRegistryEntry {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  matricNumber String
+  name         String
+  department   String?
+  level        String?
+
+  importedById String?
+  importedBy   User?   @relation("RegistryImporter", fields: [importedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([campusId, matricNumber])
+  @@index([campusId])
+}
+
+// ---------------------------------------------------------------------------
+// Vendors (PRD §17–19, §23)
+// ---------------------------------------------------------------------------
+
+/// An approved seller operating within one campus (Rule 2).
+///
+/// There is one vendor record per user account (PRD §19): the store, its owner
+/// and its manager are not separate accounts. The application and the store are
+/// the same row rather than a separate VendorApplication table, because they
+/// carry the same fields and splitting them would create two sources of truth
+/// for the store's name, location and evidence.
+model VendorProfile {
+  id String @id @default(cuid())
+
+  userId String @unique
+  user   User   @relation("VendorProfileUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  storeName String
+  /// URL-safe form of the store name, unique per campus.
+  slug      String
+
+  description String?
+  /// Contact number shown to admins and, once approved, to delivery agents.
+  phone       String
+
+  /// Free-text pickup description, e.g. "Shop 4, Student Centre" (PRD §17).
+  storefrontLocation String
+  /// Optional coordinates used by the delivery pricing engine (PRD §29).
+  latitude           Float?
+  longitude          Float?
+
+  status       VerificationStatus @default(INCOMPLETE)
+  /// True when the applicant is also a verified student of this campus
+  /// (PRD §18). Recorded at submission so a later settings change cannot
+  /// retroactively invalidate an approved vendor.
+  studentVendor Boolean           @default(false)
+
+  /// Vendor's own kill switch for incoming orders, independent of opening
+  /// hours (PRD §23). A store is orderable only when APPROVED, accepting
+  /// orders, and inside its opening hours.
+  acceptingOrders Boolean @default(false)
+
+  submittedAt  DateTime?
+  reviewedAt   DateTime?
+  reviewedById String?
+  reviewedBy   User?     @relation("VendorProfileReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  /// Reason shown to the vendor for a rejection, correction or suspension.
+  reviewNote   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  documents      OnboardingDocument[]
+  operatingHours VendorOperatingHours[]
+
+  /// Two stores on the same campus cannot share a name (Rule 2 scoping).
+  @@unique([campusId, slug])
+  @@index([campusId, status])
+  @@index([status, submittedAt])
+}
+
+/// One row per weekday per vendor (PRD §23).
+///
+/// Times are minutes from midnight in the campus timezone rather than DateTime,
+/// because a weekly schedule has no date and storing it as a timestamp invites
+/// timezone drift. A closed day is a row with isClosed = true, so an absent row
+/// means "not configured yet" instead of silently meaning "closed".
+model VendorOperatingHours {
+  id String @id @default(cuid())
+
+  vendorProfileId String
+  vendorProfile   VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  /// 0 = Sunday … 6 = Saturday, matching JavaScript's Date#getDay.
+  dayOfWeek Int
+  isClosed  Boolean @default(false)
+  /// Minutes from midnight, 0–1439. Null when the day is closed.
+  opensAt   Int?
+  /// Minutes from midnight, 1–1440 (1440 means midnight at the end of the day).
+  closesAt  Int?
+
+  @@unique([vendorProfileId, dayOfWeek])
+}
+
