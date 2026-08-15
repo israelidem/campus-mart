@@ -4,6 +4,10 @@
  * Campus Mart base design tokens.
  * Mobile-first: type scale and spacing are tuned for small screens, and the
  * layout is capped so the PWA feels app-like on phones.
+ *
+ * The visual language comes from the thing the product actually produces: a
+ * delivery docket. Printed-receipt greys, stamped ink, mono digits for anything
+ * the server decided (price, fee, OTP, deadline).
  */
 @theme {
   --color-brand-50: oklch(0.97 0.02 150);
@@ -17,9 +21,20 @@
   --color-brand-800: oklch(0.35 0.09 150);
   --color-brand-900: oklch(0.27 0.06 150);
 
+  /* Docket palette. Paper is cool, not cream; ink is a green-black so it sits
+     with the brand green; stamp red is only ever used for a stamped mark. */
+  --color-paper: oklch(0.97 0.006 140);
+  --color-paper-2: oklch(0.99 0.004 140);
+  --color-ink: oklch(0.23 0.03 160);
+  --color-ink-2: oklch(0.31 0.03 160);
+  --color-stamp: oklch(0.52 0.19 30);
+  --color-rule: oklch(0.87 0.01 150);
+
+  --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
   --font-sans:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
-    sans-serif;
+    var(--font-karla), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--font-dm-mono), ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
 
 :root {
@@ -58,6 +73,85 @@ body {
 :focus-visible {
   outline: 2px solid var(--color-brand-500);
   outline-offset: 2px;
+}
+
+/*
+ * Docket primitives, used by the landing page.
+ * A row rule is a printed perforation, not a border: dashes that read as a
+ * tear-off line on a receipt.
+ */
+.perforated {
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--color-rule) 0 6px,
+    transparent 6px 12px
+  );
+  background-repeat: no-repeat;
+  background-size: 100% 1px;
+  background-position: top left;
+}
+
+/* The two punched holes that make a card read as a torn-off slip. */
+.notched::before,
+.notched::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background-color: var(--color-ink);
+  translate: 0 -50%;
+}
+
+.notched::before {
+  left: -9px;
+}
+
+.notched::after {
+  right: -9px;
+}
+
+/* A stamped mark: ink pressed unevenly onto paper. */
+.stamped {
+  border: 2px solid var(--color-stamp);
+  color: var(--color-stamp);
+  rotate: -6deg;
+  opacity: 0.85;
+}
+
+/* Page-load sequence for the docket: the slip settles, then its lines print. */
+@keyframes docket-settle {
+  from {
+    opacity: 0;
+    translate: 0 14px;
+    rotate: 0deg;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+    rotate: -0.7deg;
+  }
+}
+
+@keyframes line-print {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+.animate-docket {
+  animation: docket-settle 620ms cubic-bezier(0.16, 0.84, 0.44, 1) both;
+}
+
+.animate-line {
+  animation: line-print 420ms ease-out both;
+  animation-delay: calc(var(--line, 0) * 90ms + 240ms);
 }
 
 @media (prefers-reduced-motion: reduce) {
