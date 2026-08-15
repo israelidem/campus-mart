@@ -2,9 +2,11 @@ import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { nextCookies } from "better-auth/next-js";
 
+import { resolveBaseUrl, resolveTrustedOrigins } from "@/lib/auth/origins";
 import { prisma } from "@/lib/db/prisma";
 import { env } from "@/lib/env";
 import { logger } from "@/lib/logger";
+
 
 /**
  * Better Auth instance — the only source of authentication truth.
@@ -22,12 +24,14 @@ import { logger } from "@/lib/logger";
 export const auth = betterAuth({
   appName: "Campus Mart",
   secret: env().BETTER_AUTH_SECRET,
-  baseURL: env().BETTER_AUTH_URL,
+  baseURL: resolveBaseUrl(),
+  trustedOrigins: resolveTrustedOrigins(),
 
   database: prismaAdapter(prisma, { provider: "postgresql" }),
 
   emailAndPassword: {
     enabled: true,
+
     minPasswordLength: 8,
     maxPasswordLength: 128,
     requireEmailVerification: true,

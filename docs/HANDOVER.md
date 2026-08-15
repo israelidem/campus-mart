@@ -33,9 +33,10 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 12 | Admin analytics | Not started |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 80 tests / 7 files passing.
+Verification at handover: `npm run test` → 88 tests / 8 files passing.
 `npm run lint` → clean. `npm run build` → compiles, typechecks and collects 49
 routes with no errors.
+
 
 All three migrations are applied to the Neon database (`npx prisma migrate status`
 
@@ -137,6 +138,24 @@ Not needed until their phase: `PAYSTACK_*` (Phase 8), `VAPID_*` (Phase 9),
 Both machines must point at the **same** Neon database, or each will need its own
 campus/admin seed data.
 
+### Deploying (Vercel)
+
+Set at least `DATABASE_URL`, `DIRECT_DATABASE_URL`, `BETTER_AUTH_SECRET` and
+`SUPER_ADMIN_EMAILS` in the project's environment variables. Two traps:
+
+- **Do not leave `BETTER_AUTH_URL` (or `NEXT_PUBLIC_APP_URL`) pointing at
+  localhost.** Better Auth compares the request's `Origin` against its base URL
+  and answers 403 `INVALID_ORIGIN` when they differ, so *every* sign-in fails.
+  `lib/auth/origins.ts` now falls back to the Vercel-provided host and trusts the
+  deployment's own hostnames, so leaving both unset is safer than setting them
+  wrongly; set them explicitly once a custom domain exists.
+- **`SUPER_ADMIN_EMAILS` must be set there too.** Without it the allowlist falls
+  back to its default and your session resolves as a plain student.
+
+Do not run the seed from a shared environment with `SEED_SUPER_ADMIN_PASSWORD`
+left in place; seed once, from a machine you control, against the same database.
+
+
 ## 4. Architecture as built
 
 ```
@@ -233,8 +252,13 @@ take stock that no longer exists.
   MVP notification channels are in-app and push only (PRD §53); check the server
   log for verification links in development.
 - No CI pipeline yet. Before pushing: `npm run test` and `npm run build`.
-- Not deployed. Vercel + Neon + R2 wiring is still to be done (Phase 0 left it at
-  "deployable", not "deployed").
+- Deployed to Vercel against the same Neon database. R2 is still unset, so
+  uploaded documents and product images land on the instance's local disk and do
+  not survive a redeploy — wire up `R2_*` before the pilot.
+- Sign-in on the deployment failed with 403 `INVALID_ORIGIN` until
+  `lib/auth/origins.ts` was introduced; see "Deploying (Vercel)" above. The
+  sign-in page now reports the cause instead of blaming the password.
+
 
 ## 7. Ground rules for whoever continues
 
