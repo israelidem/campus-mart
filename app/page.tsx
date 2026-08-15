@@ -25,16 +25,20 @@ export default async function HomePage() {
           <CardTitle>{actor ? `Signed in as ${actor.name}` : "Get started"}</CardTitle>
           <CardDescription>
             {actor
-              ? "Your campus dashboard becomes available as each phase of the platform ships."
+              ? "Continue where your role belongs on this campus."
               : "Create an account to begin campus verification."}
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-2">
             {actor ? (
-              <Button disabled>Dashboard coming in Phase 1</Button>
-
+              // The destination is resolved server-side from the stored role, so
+              // this link cannot be used to reach an area the actor lacks.
+              <Link href="/after-sign-in" className="w-full sm:w-auto">
+                <Button>Continue</Button>
+              </Link>
             ) : (
+
               <>
                 <Link href="/sign-up" className="w-full sm:w-auto">
                   <Button>Create account</Button>
@@ -58,9 +62,13 @@ export default async function HomePage() {
         <CardContent>
           <ul className="space-y-2 text-sm">
             <li>✅ Phase 0 — foundation: database, authentication, logging, base UI</li>
-            <li>⏳ Phase 1 — student registration, verification &amp; document uploads</li>
-            <li>⏳ Phase 2 — campus management, admin roles, campus isolation</li>
-            <li>⏳ Phase 3+ — vendors, marketplace, checkout, delivery, OTP, payments</li>
+            <li>✅ Phase 1 — student registration, verification &amp; document uploads</li>
+            <li>✅ Phase 2 — campus management, admin roles, campus isolation</li>
+            <li>✅ Phase 3 — vendor applications, review queue &amp; storefronts</li>
+            <li>✅ Phase 4 — marketplace: products, inventory, search &amp; filters</li>
+            <li>⏳ Phase 5 — cart &amp; checkout, delivery fees</li>
+            <li>⏳ Phase 6+ — delivery engine, OTP, payments, ratings</li>
+
           </ul>
         </CardContent>
       </Card>
