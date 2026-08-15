@@ -207,8 +207,10 @@ model Campus {
   agents            DeliveryAgentProfile[]
   deliveries        Delivery[]
   deliveryEvents    DeliveryEvent[]
+  payments          Payment[]
 
   @@index([status])
+
 }
 
 /// Per-campus operational configuration (PRD §18, §29, §35, §47).
@@ -533,6 +535,13 @@ model VendorProfile {
   reviewedAt   DateTime?
   reviewedById String?
   reviewedBy   User?     @relation("VendorProfileReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  /// Paystack subaccount that receives this store's share of a goods payment
+  /// (PRD §34, Phase 8). Null means the vendor has not been onboarded to
+  /// Paystack yet, so their share lands in the platform account and is owed as a
+  /// manual transfer — recorded on the payment, never assumed.
+  paystackSubaccountCode String?
+
   /// Reason shown to the vendor for a rejection, correction or suspension.
   reviewNote   String?
 
@@ -883,6 +892,7 @@ model Order {
   updatedAt DateTime @updatedAt
 
   vendorOrders VendorOrder[]
+  payments     Payment[]
 
   @@index([campusId, status])
   @@index([studentId, placedAt])
@@ -1113,9 +1123,11 @@ model Delivery {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  events DeliveryEvent[]
+  events   DeliveryEvent[]
+  payments Payment[]
 
   /// The pool query: available jobs on a campus, optionally narrowed to the
+
   /// destination an agent is already locked to.
   @@index([campusId, status])
   @@index([campusId, status, destinationLocationId])
@@ -1152,3 +1164,132 @@ model DeliveryEvent {
   @@index([deliveryId, createdAt])
   @@index([campusId, type, createdAt])
 }
+
+// ---------------------------------------------------------------------------
+// Payments (PRD §30–35, §46–50, Phase 8)
+// ---------------------------------------------------------------------------
+
+/// What a payment is for. There are exactly two chargeable events in the MVP,
+/// and naming them in an enum is what stops a third from being invented by
+/// accident (PRD §32, §46).
+enum PaymentPurpose {
+  /// Charged on a placed invoice; settling it releases the delivery to the pool.
+  DELIVERY_FEE
+  /// Charged after a verified hand-over; settling it completes the delivery.
+  GOODS
+}
+
+/// Lifecycle of one payment attempt.
+///
+/// PENDING means "we asked Paystack for a checkout", which is not a claim about
+/// money. Only a verified provider response moves a row to SUCCESS.
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  /// Initialised, never completed, and superseded by a newer attempt.
+  ABANDONED
+  /// Money arrived and was sent back — the goods had already gone home.
+  REFUNDED
+}
+
+/// One payment attempt against one order (PRD §33).
+///
+/// The row is created *before* the student is sent to Paystack, so a payment
+/// that vanishes mid-flight is still visible to support. `reference` is ours and
+/// unique, which is what makes the webhook idempotent: the provider's callback
+/// finds exactly one row, and re-delivering the same callback finds it already
+/// settled and does nothing.
+///
+/// The amounts are copied from the order and the vendor order at initialisation.
+/// They are not recomputed when the webhook lands: what the student was asked to
+/// pay is what must have arrived, and a mismatch is a refusal rather than a
+/// reconciliation (Rule 1).
+model Payment {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// Set for GOODS payments: the delivery whose hand-over unlocked the charge.
+  deliveryId String?
+  delivery   Delivery? @relation(fields: [deliveryId], references: [id], onDelete: SetNull)
+
+  purpose PaymentPurpose
+  status  PaymentStatus  @default(PENDING)
+
+  /// Our reference, sent to Paystack and echoed back. Unique platform-wide.
+  reference String @unique
+
+  /// What the student was asked to pay, in kobo.
+  amountKobo Int
+  /// The part that stays with the platform after the split.
+  platformKobo Int
+  /// The vendor's share of a goods payment, 0 for a delivery fee.
+  vendorPayoutKobo Int @default(0)
+  /// True when Paystack routed the vendor's share to their subaccount. False
+  /// means the platform is holding it and owes a transfer.
+  vendorRouted     Boolean @default(false)
+  /// Subaccount the split was addressed to, kept for reconciliation.
+  vendorSubaccountCode String?
+
+  /// Who started the payment. A plain id, not a relation: `User` already
+  /// carries a long list of back-relations, and a payment is always reached
+  /// through its order.
+  initiatedById String?
+
+  /// Paystack's hosted checkout URL for this attempt.
+  authorizationUrl String?
+
+  paidAt        DateTime?
+  /// Provider's own words when a payment fails, shown to support, not to users.
+  failureReason String?
+
+  refundedAt         DateTime?
+  refundedAmountKobo Int?
+  refundReason       String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events PaymentEvent[]
+
+  @@index([orderId, purpose, status])
+  @@index([deliveryId, status])
+  @@index([campusId, status, createdAt])
+  @@index([status, createdAt])
+}
+
+/// One webhook or verification event, stored before it is acted on (PRD §50).
+///
+/// `providerEventKey` is the idempotency key. Paystack retries deliveries, and
+/// the unique constraint is what makes the second delivery a no-op instead of a
+/// second effect: the insert fails, so the handler stops. `processedAt` records
+/// that the effect ran, in the same transaction as the effect itself.
+model PaymentEvent {
+  id String @id @default(cuid())
+
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  /// Paystack's event id when present, otherwise `event:reference`.
+  providerEventKey String @unique
+  eventType        String
+
+  /// The raw body as received, so a disputed settlement can be re-read exactly
+  /// as the provider sent it.
+  payload Json
+
+  processedAt DateTime?
+  /// Why an event was received but deliberately not acted on.
+  note        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([paymentId, createdAt])
+  @@index([eventType, createdAt])
+}
+

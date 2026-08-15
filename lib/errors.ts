@@ -15,7 +15,12 @@ export type ErrorCode =
   | "STATE_CONFLICT"
   | "RATE_LIMITED"
   | "PAYMENT_ERROR"
+  /// The provider answered, but with a failure of its own (Phase 8).
+  | "PAYMENT_PROVIDER_ERROR"
+  /// This deployment has no payment credentials, so no money can move.
+  | "PAYMENTS_NOT_CONFIGURED"
   | "INTERNAL_ERROR";
+
 
 export class AppError extends Error {
   readonly status: number;

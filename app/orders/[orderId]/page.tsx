@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { HandoverCode } from "@/components/delivery/handover-code";
 import { OrderCancelButton } from "@/components/orders/order-cancel-button";
+import { PayButton } from "@/components/payments/pay-button";
 import { Card } from "@/components/ui/card";
 import { getActor } from "@/lib/auth/session";
 import { listDeliveriesForStudentOrder } from "@/lib/delivery/delivery-service";
@@ -124,12 +125,21 @@ export default async function OrderPage({ params }: { params: Promise<{ orderId:
                   <HandoverCode deliveryId={delivery.id} pickupName={delivery.pickupName} />
                 ) : null}
 
-                {delivery.status === "PAYMENT_PENDING" && delivery.goodsPaymentDeadline ? (
-                  <p className="text-sm">
-                    Package received. Pay for your goods by{" "}
-                    {delivery.goodsPaymentDeadline.toLocaleTimeString("en-NG")} or they go back to
-                    the store.
-                  </p>
+                {delivery.status === "PAYMENT_PENDING" ? (
+                  <div className="space-y-2">
+                    {delivery.goodsPaymentDeadline ? (
+                      <p className="text-sm">
+                        Package received. Pay for your goods by{" "}
+                        {delivery.goodsPaymentDeadline.toLocaleTimeString("en-NG")} or they go back
+                        to the store.
+                      </p>
+                    ) : null}
+                    {/*
+                      The amount is not passed in: the server reads it from the
+                      vendor order it froze at checkout (Rule 1).
+                    */}
+                    <PayButton purpose="goods" deliveryId={delivery.id} />
+                  </div>
                 ) : null}
               </li>
             ))}
@@ -141,13 +151,20 @@ export default async function OrderPage({ params }: { params: Promise<{ orderId:
 
         <Card>
           <p className="text-sm">
-            Paying the delivery fee is the next step; that comes with payments (Phase 8). Until then
-            you can still cancel this order and your items go back on the shelf.
+            Pay the {formatKobo(order.deliveryFeeKobo)} delivery fee to release your packages to a
+            delivery agent. You pay for the goods themselves only when they reach you.
           </p>
           <div className="mt-3">
+            <PayButton purpose="delivery-fee" orderId={order.id} />
+          </div>
+          <p className="mt-4 text-sm opacity-70">
+            Changed your mind? Cancelling now puts your items back on the shelf.
+          </p>
+          <div className="mt-2">
             <OrderCancelButton orderId={order.id} />
           </div>
         </Card>
+
       ) : null}
     </section>
   );
