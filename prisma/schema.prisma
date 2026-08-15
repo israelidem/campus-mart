@@ -63,6 +63,20 @@ enum DocumentType {
   AGENT_FACIAL_VERIFICATION
 }
 
+/// Why a product's stock moved (PRD §22). Every movement is recorded, so the
+/// current stock level is always explainable from its history.
+enum InventoryReason {
+  /// Vendor added stock.
+  RESTOCK
+  /// Vendor corrected the count after a stock take.
+  ADJUSTMENT
+  /// Reserved or sold through an order (Phase 5).
+  SALE
+  /// Returned to stock after a cancellation or return (Phase 6/11).
+  RETURN
+}
+
+
 // ---------------------------------------------------------------------------
 // Campus (multi-campus from the first migration — PRD Part D)
 // ---------------------------------------------------------------------------
@@ -89,8 +103,14 @@ model Campus {
   registryEntries StudentRegistryEntry[]
   documents       OnboardingDocument[]
   settings        CampusSettings?
+  categories      Category[]
+  products        Product[]
+  productImages   ProductImage[]
+  inventory       InventoryTransaction[]
+
 
   @@index([status])
+
 }
 
 /// Per-campus operational configuration (PRD §18, §29, §35, §47).
@@ -171,6 +191,8 @@ model User {
   reviewedVendors   VendorProfile[]        @relation("VendorProfileReviewer")
   uploadedDocuments OnboardingDocument[]   @relation("DocumentUploader")
   importedRegistry  StudentRegistryEntry[] @relation("RegistryImporter")
+  inventoryChanges  InventoryTransaction[] @relation("InventoryActor")
+
 
   @@index([campusId, role])
   @@index([role])
@@ -416,6 +438,9 @@ model VendorProfile {
 
   documents      OnboardingDocument[]
   operatingHours VendorOperatingHours[]
+  products       Product[]
+  inventory      InventoryTransaction[]
+
 
   /// Two stores on the same campus cannot share a name (Rule 2 scoping).
   @@unique([campusId, slug])
@@ -445,4 +470,167 @@ model VendorOperatingHours {
 
   @@unique([vendorProfileId, dayOfWeek])
 }
+
+// ---------------------------------------------------------------------------
+// Marketplace (PRD §20–22, §24, Phase 4)
+// ---------------------------------------------------------------------------
+
+/// A product category, owned by a campus and curated by its Campus Admin
+/// (PRD §20).
+///
+/// Categories are per-campus rather than global because campuses sell different
+/// things, and a global list would let one campus's taxonomy leak into another's
+/// filters. `sortOrder` lets an admin control the browse order without renaming.
+model Category {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  name String
+  /// URL-safe form of the name, unique per campus.
+  slug String
+
+  description String?
+  sortOrder   Int     @default(0)
+  /// Deactivated categories keep their products but disappear from filters.
+  isActive    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@unique([campusId, slug])
+  @@index([campusId, isActive])
+}
+
+/// Something a vendor sells (PRD §21–22).
+///
+/// Price is integer kobo (PRD §64) and stock is a plain integer that may never
+/// go negative; every change to it is written as an `InventoryTransaction` in
+/// the same transaction, so the level is always reconcilable from its history.
+///
+/// `isAvailable` is the vendor's switch for a product that exists but is not
+/// currently on sale. `deletedAt` is a soft delete: a product that has appeared
+/// in an order must remain readable for that order's history (Phase 5), so rows
+/// are retired rather than removed.
+model Product {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  vendorProfileId String
+  vendorProfile   VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  /// Optional so a vendor is never blocked from listing by a missing taxonomy.
+  categoryId String?
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  name String
+  /// URL-safe form of the name, unique per store.
+  slug String
+
+  description String?
+
+  /// Unit price in kobo. The server is the only source of price (Rule 1).
+  priceKobo Int
+
+  /// Units in stock. Never negative — enforced by a check constraint and by
+  /// every write going through the inventory service.
+  stockQuantity      Int @default(0)
+  /// At or below this level the vendor is warned that stock is running out.
+  lowStockThreshold  Int @default(0)
+  /// Free-text unit shown next to the price, e.g. "per plate", "per bottle".
+  unitLabel          String?
+
+  /// Vendor's per-product switch. A product is buyable only when available, in
+  /// stock, not deleted, and its store is APPROVED and open.
+  isAvailable Boolean @default(true)
+
+  /// Units sold, used for the "popular" sort. Ratings arrive in Phase 10.
+  soldCount Int @default(0)
+
+  /// Set when the vendor retires the product. Retired products never appear in
+  /// the marketplace but remain readable by their vendor and by past orders.
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  images    ProductImage[]
+  inventory InventoryTransaction[]
+
+  /// Two products in the same store cannot share a name.
+  @@unique([vendorProfileId, slug])
+  @@index([campusId, isAvailable])
+  @@index([campusId, categoryId])
+  @@index([vendorProfileId])
+  @@index([campusId, createdAt])
+  @@index([campusId, priceKobo])
+}
+
+/// A product photograph. The bytes live in private storage and are served by
+/// the server (`/api/products/images/[imageId]`), like onboarding documents, so
+/// that a campus's catalogue is not published to the open internet.
+model ProductImage {
+  id String @id @default(cuid())
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  /// Object key in private storage. Never a public URL.
+  storageKey String  @unique
+  mimeType   String
+  sizeBytes  Int
+  checksum   String?
+  /// Display order; the lowest position is the product's main image.
+  position   Int     @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([productId, position])
+  @@index([campusId])
+}
+
+/// One recorded movement of stock (PRD §22).
+///
+/// `resultingStock` is stored, not derived, so the ledger can be audited
+/// without replaying every row, and a race that produced an impossible level is
+/// visible after the fact.
+model InventoryTransaction {
+  id String @id @default(cuid())
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  vendorProfileId String
+  vendorProfile   VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  reason InventoryReason
+  /// Signed change: positive adds stock, negative removes it. Never zero.
+  delta  Int
+  /// Stock level after this movement was applied.
+  resultingStock Int
+
+  note String?
+
+  /// Null for system-initiated movements (order expiry, webhooks).
+  actorId String?
+  actor   User?   @relation("InventoryActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@index([productId, createdAt])
+  @@index([campusId, createdAt])
+  @@index([vendorProfileId, createdAt])
+}
+
 

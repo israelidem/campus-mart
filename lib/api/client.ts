@@ -81,7 +81,12 @@ export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
   );
 }
 
+export async function apiDelete<T>(path: string): Promise<T> {
+  return unwrap<T>(await fetch(path, { method: "DELETE", credentials: "same-origin" }));
+}
+
 export async function apiUpload<T>(path: string, form: FormData): Promise<T> {
+
 
 
   return unwrap<T>(

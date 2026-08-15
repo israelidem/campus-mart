@@ -1,12 +1,15 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-15. Written so work can continue on a second machine (or by
-another developer/agent) without re-reading the whole codebase.
+Last updated: 2026-08-15 (end of Phase 4). Written so work can continue on a
+second machine (or by another developer/agent) without re-reading the whole
+codebase.
+
 
 Source of truth for scope: `docs/PRD.docx`. Build order and
 
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-3-report.md`.
+`docs/phase-0-report.md` … `docs/phase-4-report.md`.
+
 
 ---
 
@@ -18,8 +21,9 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 1 | Auth & user management: registration, email verification, sessions, student onboarding, private document uploads, duplicate protection, student registry CSV import | Done |
 | 2 | Campus management: campuses, campus settings, Campus Admin, Super Admin, server-side campus isolation, audit logging | Done |
 | 3 | Vendor system: application, storefront/identity uploads, admin review queue, suspend/reinstate, store profile, operating hours, student-vendor toggle, marketplace exposure | Done |
-| 4 | Marketplace: categories, products, images, inventory, search/filter/sort | **Next** |
-| 5 | Cart & checkout: multi-vendor cart, master invoice, vendor orders, price snapshots, delivery locations, distance + delivery fee | Not started |
+| 4 | Marketplace: categories, products, images, inventory ledger, search/filter/sort | Done |
+| 5 | Cart & checkout: multi-vendor cart, master invoice, vendor orders, price snapshots, delivery locations, distance + delivery fee | **Next** |
+
 | 6 | Delivery engine: pool, atomic assignment, 15-minute pickup rule, destination lock, cancellations, returns | Not started |
 | 7 | Delivery OTP & goods-payment unlock, payment timeout | Not started |
 | 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | Not started |
@@ -29,8 +33,17 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 12 | Admin analytics | Not started |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 46 tests / 5 files passing.
-`npm run build` → compiles, typechecks and prerenders 35 routes with no errors.
+Verification at handover: `npm run test` → 80 tests / 7 files passing.
+`npm run lint` → clean. `npm run build` → compiles, typechecks and collects 49
+routes with no errors.
+
+All three migrations are applied to the Neon database (`npx prisma migrate status`
+
+clean, `prisma migrate diff --from-config-datasource --to-schema` reports no
+difference), so a second machine pointed at the same database only needs
+`npm install` and `npx prisma generate`.
+
+
 
 ---
 
@@ -87,7 +100,9 @@ campus/admin seed data.
 app/                 route handlers + pages, grouped by role
   (auth)/            sign-up, sign-in, verify-email
   student/           onboarding
-  vendor/            store (apply + manage)
+  vendor/            store (apply + manage), products
+  marketplace/       browse + product detail            (students)
+
   admin/             students, vendors, settings        (Campus Admin)
   super-admin/       campuses                           (platform owner)
   api/               all mutations; thin wrappers over lib/ services
@@ -122,32 +137,34 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 4 should do next
+## 5. What Phase 5 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-1. Schema: `Category`, `Product`, `InventoryTransaction`. Every one carries
-   `campusId`; `Product` also carries `vendorProfileId`. Price as integer kobo.
-   Index `(campusId, isAvailable)` and `(vendorProfileId)`.
-2. Service (`lib/products/product-service.ts`): create/update/deactivate a
-   product, all gated by `requireApprovedVendor` from `lib/vendors/vendor-service`
-   — that function already exists and is the single approval gate.
-3. Inventory: adjustments must be transactional and recorded as
-   `InventoryTransaction` rows. Do not let stock go negative (PRD §22); the
-   two-buyers-one-unit race is a Phase 5 acceptance test, so build the primitive
-   correctly now.
-4. Marketplace read API: search across product name, vendor name and category;
-   filter by category/price/rating/availability; sort by popular/rating/price/
-   newest; paginate. Always campus-scoped, and only products of `APPROVED`
-   vendors.
-5. UI: vendor product management under `app/vendor/products`, student browse and
-   product detail under `app/marketplace`.
-6. Tests: price/stock validation, campus isolation for the marketplace query, and
-   the "approved vendors only" filter.
+1. Schema: `Cart`/`CartItem`, `Order` (the master invoice), `VendorOrder`,
+   `OrderItem`, `DeliveryLocation`. Every one carries `campusId`. Order items must
+   **snapshot** `unitPriceKobo` and the product name at checkout — later price
+   edits must not change a placed order.
+2. Cart: one cart per student per campus, items from several vendors allowed. The
+   cart is split into one `VendorOrder` per vendor at checkout, under a single
+   master invoice.
+3. Reservation: at checkout, decrement stock through the Phase 4 primitive
+   `adjustInventory` (reason `SALE`) inside the same transaction as the order
+   write. `resolveStockChange` plus the `Product_stockQuantity_nonnegative`
+   constraint are what make the "two buyers, one unit" acceptance test pass — do
+   not bypass them with a bare `update`.
+4. Delivery fee: computed server-side only, from campus settings and the distance
+   between the store and the delivery location (`MAP_PROVIDER=haversine` for now).
+   Integer kobo, via `lib/money.ts`.
+5. UI: cart and checkout for students; incoming orders for vendors.
+6. Tests: price snapshot immutability, per-vendor split, fee computation, and
+   stock never going negative under concurrent checkout.
 
-Acceptance (PRD Phase 4): a vendor can create products; a student on the same
-campus can find and view them; a student on another campus cannot.
+Acceptance (PRD Phase 5): a student can check out a multi-vendor cart and get one
+invoice with one delivery fee and correct per-vendor totals; a second buyer cannot
+take stock that no longer exists.
+
 
 ## 6. Known gaps and debts
 
@@ -157,9 +174,18 @@ campus can find and view them; a student on another campus cannot.
 - Vendor suspension does not cancel in-flight work — there are no orders yet.
   `requireApprovedVendor` is the hook Phases 5–6 must call.
 - Repeated-cancellation suspension (Rule 27) needs the delivery engine (Phase 6).
-- Ratings are absent by design until Phase 10; the marketplace exposes no rating
-  field yet, so "sort by rating" in Phase 4 will need a placeholder or should be
-  deferred to Phase 10.
+- Ratings are absent by design until Phase 10, so the marketplace has no
+  "sort by rating" option and no rating filter. Add both with Phase 10 rather than
+  shipping a placeholder.
+- Product images are stored privately and streamed by
+  `/api/products/images/[imageId]`, which means no CDN caching for listing photos.
+  Revisit in Phase 13 (performance) if browse latency matters.
+- `soldCount` on `Product` powers "most popular" but nothing increments it yet;
+  Phase 5's checkout must, in the same transaction as the `SALE` ledger row.
+- Marketplace search uses `contains` with `mode: "insensitive"`. Adequate for the
+  ABUAD pilot; Phase 13 should consider Postgres full-text search or a trigram
+  index if catalogues grow.
+
 - No email delivery is configured. Email verification is issued by Better Auth but
   MVP notification channels are in-app and push only (PRD §53); check the server
   log for verification links in development.
