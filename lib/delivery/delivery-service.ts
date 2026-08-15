@@ -25,10 +25,19 @@ import {
   StateConflictError,
   ValidationError,
 } from "@/lib/errors";
-import type { DeliveryEventType, DeliveryStatus } from "@/lib/generated/prisma/enums";
+import type {
+  DeliveryEventType,
+  DeliveryStatus,
+  NotificationType,
+} from "@/lib/generated/prisma/enums";
+
 import { logger } from "@/lib/logger";
+import type { NotificationFacts } from "@/lib/notifications/messages";
+import { notify, onDutyAgentRecipients } from "@/lib/notifications/notification-service";
+
 import type {
   DeliveryCancelInput,
+
   DeliveryProgressInput,
   HandoverVerifyInput,
 } from "@/validations/delivery";
@@ -281,8 +290,15 @@ export async function publishDeliveriesForPaidOrder(
 
   const waiting = await client.delivery.findMany({
     where: { vendorOrder: { orderId }, status: "AWAITING_DELIVERY_PAYMENT" },
-    select: { id: true, campusId: true },
+    select: {
+      id: true,
+      campusId: true,
+      destinationName: true,
+      orderDeliveryFeeKobo: true,
+    },
   });
+
+  const pooled: typeof waiting = [];
 
   for (const delivery of waiting) {
     const claimed = await client.delivery.updateMany({
@@ -294,14 +310,99 @@ export async function publishDeliveriesForPaidOrder(
     await client.deliveryEvent.create({
       data: { deliveryId: delivery.id, campusId: delivery.campusId, type: "POOLED" },
     });
+    pooled.push(delivery);
+  }
+
+  // Announced only for deliveries this call actually pooled, and only after the
+  // status write: a webhook that retries must not re-alert every agent.
+  //
+  // When `tx` is present the caller is mid-transaction, so the fan-out is left
+  // to them — pushing inside a transaction risks announcing a payment that then
+  // rolls back (PRD §52).
+  if (!tx) {
+    for (const delivery of pooled) {
+      await notifyPoolOfDelivery(delivery);
+    }
   }
 
   return waiting.length;
 }
 
 /**
+ * Tells every on-duty agent on the campus that work is available (PRD §38).
+ *
+ * Exported for the paths that pool a delivery in their own transaction and must
+ * announce it once they have committed.
+ */
+export async function notifyPoolOfDelivery(delivery: {
+  id: string;
+  campusId: string;
+  destinationName: string;
+  orderDeliveryFeeKobo: number;
+}): Promise<void> {
+  const recipients = await onDutyAgentRecipients(delivery.campusId);
+
+  await notify({
+    type: "DELIVERY_AVAILABLE",
+    recipients,
+    // Destination and fee only. An agent who has not accepted this job has no
+    // business knowing whose package it is or what is in it (PRD §38).
+    facts: {
+      destinationName: delivery.destinationName,
+      amountKobo: delivery.orderDeliveryFeeKobo,
+    },
+    entityType: "Delivery",
+    entityId: delivery.id,
+  });
+}
+
+/**
+ * Tell the student who is waiting for this package that it moved.
+ *
+ * Reads the audience itself, after the transaction that changed the state has
+ * committed, so a rolled-back progress step never produces a notification.
+ * Failures are swallowed by `notify`, so a delivery step never fails because a
+ * phone could not be reached (PRD §52).
+ */
+async function notifyStudentOfDelivery(
+  deliveryId: string,
+  type: NotificationType,
+  extra?: NotificationFacts,
+): Promise<void> {
+  const row = await prisma.delivery.findUnique({
+    where: { id: deliveryId },
+    select: {
+      campusId: true,
+      pickupName: true,
+      destinationName: true,
+      vendorOrder: {
+        select: { order: { select: { id: true, reference: true, studentId: true } } },
+      },
+    },
+  });
+  if (!row) return;
+
+  await notify({
+    type,
+    recipients: [{ userId: row.vendorOrder.order.studentId, campusId: row.campusId }],
+    facts: {
+      reference: row.vendorOrder.order.reference,
+      storeName: row.pickupName,
+      destinationName: row.destinationName,
+      ...extra,
+    },
+    // Linked to the order, not the delivery: /orders is where a student can act
+    // on it, and a delivery id means nothing to them.
+    entityType: "Order",
+    entityId: row.vendorOrder.order.id,
+  });
+}
+
+
+/**
  * The destination an agent is currently locked to, or null when free (PRD §43).
  */
+
 async function currentLock(
   client: PrismaTransactionClient | typeof prisma,
   agentProfileId: string,
@@ -371,7 +472,8 @@ export async function listMyDeliveries(actor: Actor): Promise<DeliveryView[]> {
 export async function acceptDelivery(actor: Actor, deliveryId: string): Promise<DeliveryView> {
   const agent = await requireApprovedAgent(actor, { requireOnDuty: true });
 
-  return prisma.$transaction(async (tx) => {
+  const accepted = await prisma.$transaction(async (tx) => {
+
     const existing = await tx.delivery.findFirst({
       where: { id: deliveryId, campusId: agent.campusId },
       select: { id: true, status: true, campusId: true, destinationLocationId: true },
@@ -432,9 +534,16 @@ export async function acceptDelivery(actor: Actor, deliveryId: string): Promise<
     });
     return toView(row, { assigned: true });
   });
+
+  // Only the student is told, and only after the claim is committed: the losing
+  // agent in a race must not trigger a "an agent is on it" for someone else.
+  await notifyStudentOfDelivery(accepted.id, "DELIVERY_ACCEPTED");
+
+  return accepted;
 }
 
 const PROGRESS_EVENT: Record<DeliveryProgressInput["action"], DeliveryEventType> = {
+
   PICKED_UP: "PICKED_UP",
   IN_TRANSIT: "IN_TRANSIT",
   ARRIVED: "ARRIVED",
@@ -455,7 +564,7 @@ export async function progressDelivery(
 ): Promise<DeliveryView> {
   const agent = await requireApprovedAgent(actor);
 
-  return prisma.$transaction(async (tx) => {
+  const progressed = await prisma.$transaction(async (tx) => {
     const existing = await tx.delivery.findFirst({
       where: { id: deliveryId, agentProfileId: agent.id, campusId: agent.campusId },
       select: {
@@ -467,6 +576,7 @@ export async function progressDelivery(
       },
     });
     if (!existing) throw new NotFoundError("Delivery not found");
+
 
     if (!canTransition(existing.status, input.action)) {
       throw new StateConflictError(
@@ -544,10 +654,28 @@ export async function progressDelivery(
     });
     return toView(row, { assigned: true });
   });
+
+  // IN_TRANSIT is deliberately silent: it tells a student nothing they cannot
+  // already see, and a phone buzzing for every leg of a five-minute walk is the
+  // fastest way to have notifications switched off (PRD §55).
+  if (input.action === "PICKED_UP") {
+    await notifyStudentOfDelivery(progressed.id, "DELIVERY_PICKED_UP");
+  }
+  if (input.action === "ARRIVED") {
+    // The wait is on a clock the server owns, so the student is told how long
+    // they have rather than left to guess.
+    const minutes = progressed.waitDeadline
+      ? Math.max(0, Math.round((progressed.waitDeadline.getTime() - Date.now()) / 60_000))
+      : undefined;
+    await notifyStudentOfDelivery(progressed.id, "DELIVERY_ARRIVED", { minutes });
+  }
+
+  return progressed;
 }
 
 /**
  * Put a claimed delivery back in the pool, unassigned (PRD §41, §42).
+
  *
  * Shared by the pickup-expiry sweep and by an agent giving a job up, because
  * both end in the same place: no agent, no deadlines, one more offer, and the
@@ -687,7 +815,7 @@ export async function reportStudentUnavailable(
 ): Promise<{ id: string; status: DeliveryStatus }> {
   const agent = await requireApprovedAgent(actor);
 
-  return prisma.$transaction(async (tx) => {
+  const returned = await prisma.$transaction(async (tx) => {
     const existing = await tx.delivery.findFirst({
       where: { id: deliveryId, agentProfileId: agent.id, campusId: agent.campusId },
       select: {
@@ -699,6 +827,7 @@ export async function reportStudentUnavailable(
       },
     });
     if (!existing) throw new NotFoundError("Delivery not found");
+
 
     if (!canTransition(existing.status, "RETURNED")) {
       throw new StateConflictError(
@@ -753,12 +882,20 @@ export async function reportStudentUnavailable(
       tx,
     );
 
-    return { id: existing.id, status: "RETURNED" as DeliveryStatus };
+    return { id: existing.id, status: "RETURNED" as DeliveryStatus, note };
   });
+
+  // The student is told their goods went back, and why. This is one of the few
+  // push-worthy messages: they are waiting for something that is no longer
+  // coming (PRD §44, §55).
+  await notifyStudentOfDelivery(returned.id, "DELIVERY_RETURNED", { reason: returned.note });
+
+  return { id: returned.id, status: returned.status };
 }
 
 /**
  * Cancel one vendor's slice and give its reserved units back.
+
  *
  * Every unit that leaves or re-enters stock is written as an
  * `InventoryTransaction` in the same transaction as the movement itself, so the
@@ -1057,7 +1194,7 @@ export async function verifyHandoverCode(
 ): Promise<DeliveryView> {
   const agent = await requireApprovedAgent(actor);
 
-  return prisma.$transaction(async (tx) => {
+  const verified = await prisma.$transaction(async (tx) => {
     const existing = await tx.delivery.findFirst({
       where: { id: deliveryId, agentProfileId: agent.id, campusId: agent.campusId },
       select: {
@@ -1068,9 +1205,11 @@ export async function verifyHandoverCode(
         otpExpiresAt: true,
         otpAttempts: true,
         otpVerifiedAt: true,
+        vendorOrder: { select: { goodsSubtotalKobo: true } },
       },
     });
     if (!existing) throw new NotFoundError("Delivery not found");
+
 
     if (existing.status !== "AWAITING_OTP") {
       throw new StateConflictError(
@@ -1180,12 +1319,26 @@ export async function verifyHandoverCode(
       where: { id: existing.id },
       select: deliverySelect,
     });
-    return toView(row, { assigned: true });
+    return {
+      view: toView(row, { assigned: true }),
+      goodsSubtotalKobo: existing.vendorOrder.goodsSubtotalKobo,
+      goodsPaymentWindowMinutes,
+    };
   });
+
+  // The one notification with money and a deadline in it, because the student
+  // now has a window to pay for goods they are already holding (PRD §46).
+  await notifyStudentOfDelivery(verified.view.id, "HANDOVER_VERIFIED", {
+    amountKobo: verified.goodsSubtotalKobo,
+    minutes: verified.goodsPaymentWindowMinutes,
+  });
+
+  return verified.view;
 }
 
 /**
  * Close a delivery once the goods have been paid for (PRD §46).
+
  *
  * The seam Phase 8 calls from the Paystack webhook, deliberately not a route:
  * only the payment provider may declare money received (Rule 3). Idempotent,

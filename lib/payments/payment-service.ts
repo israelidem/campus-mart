@@ -3,14 +3,18 @@ import type { Actor } from "@/lib/auth/session";
 import { prisma, type PrismaTransactionClient } from "@/lib/db/prisma";
 import {
   completeDeliveryOnGoodsPayment,
+  notifyPoolOfDelivery,
   publishDeliveriesForPaidOrder,
 } from "@/lib/delivery/delivery-service";
+
 import { publicEnv } from "@/lib/env";
 import { ForbiddenError, NotFoundError, StateConflictError, ValidationError } from "@/lib/errors";
 import type { PaymentPurpose } from "@/lib/generated/prisma/enums";
 import { logger } from "@/lib/logger";
+import { notify } from "@/lib/notifications/notification-service";
 import {
   generatePaymentReference,
+
   initializeTransaction,
   refundTransaction,
   verifyTransaction,
@@ -323,7 +327,24 @@ async function applySuccessfulPayment(
   verified: VerifiedTransaction,
 ): Promise<ApplyOutcome> {
   const outcome = await prisma.$transaction(async (tx) => {
+    // Gathered inside the transaction and returned from it, so the fan-out below
+    // only ever describes writes that actually committed (PRD §52).
+    let settled: {
+      studentId: string;
+      campusId: string;
+      amountKobo: number;
+      reference: string;
+      orderId: string;
+    } | null = null;
+    let pooled: {
+      id: string;
+      campusId: string;
+      destinationName: string;
+      orderDeliveryFeeKobo: number;
+    }[] = [];
+
     const payment = await tx.payment.findUnique({
+
       where: { reference },
       select: {
         id: true,
@@ -360,7 +381,7 @@ async function applySuccessfulPayment(
     if (payment.purpose === "DELIVERY_FEE") {
       const order = await tx.order.findUnique({
         where: { id: payment.orderId },
-        select: { id: true, status: true },
+        select: { id: true, status: true, reference: true, studentId: true },
       });
       if (!order || order.status === "CANCELLED") {
         return { applied: false, refunded: true, reason: "order cancelled" } as const;
@@ -375,16 +396,45 @@ async function applySuccessfulPayment(
         await tx.order.update({ where: { id: order.id }, data: { status: "DELIVERY_PAID" } });
         // The delivery engine owns what happens next; this service only pays.
         await publishDeliveriesForPaidOrder(order.id, tx);
+
+        // Read back what is now in the pool so the agents can be told once this
+        // transaction commits. `publishDeliveriesForPaidOrder` deliberately does
+        // not announce when it is handed a transaction.
+        pooled = await tx.delivery.findMany({
+          where: { vendorOrder: { orderId: order.id }, status: "AVAILABLE" },
+          select: {
+            id: true,
+            campusId: true,
+            destinationName: true,
+            orderDeliveryFeeKobo: true,
+          },
+        });
       }
+
+      settled = {
+        studentId: order.studentId,
+        campusId: payment.campusId,
+        amountKobo: payment.amountKobo,
+        reference: order.reference,
+        orderId: order.id,
+      };
     } else {
       if (!payment.deliveryId) {
+
         return { applied: false, refunded: false, reason: "goods payment has no delivery" } as const;
       }
 
       const delivery = await tx.delivery.findUnique({
         where: { id: payment.deliveryId },
-        select: { id: true, status: true },
+        select: {
+          id: true,
+          status: true,
+          vendorOrder: {
+            select: { order: { select: { id: true, reference: true, studentId: true } } },
+          },
+        },
       });
+
       if (!delivery || delivery.status !== "PAYMENT_PENDING") {
         // Timed out and returned, or cancelled, while the payment was in flight.
         return { applied: false, refunded: true, reason: "delivery no longer awaiting payment" } as const;
@@ -396,11 +446,20 @@ async function applySuccessfulPayment(
       });
 
       await completeDeliveryOnGoodsPayment(delivery.id, tx);
+
+      settled = {
+        studentId: delivery.vendorOrder.order.studentId,
+        campusId: payment.campusId,
+        amountKobo: payment.amountKobo,
+        reference: delivery.vendorOrder.order.reference,
+        orderId: delivery.vendorOrder.order.id,
+      };
     }
 
     await recordAudit(
       {
         action: AuditAction.PAYMENT_SUCCEEDED,
+
         entityType: "Payment",
         entityId: payment.id,
         actorId: null,
@@ -410,10 +469,36 @@ async function applySuccessfulPayment(
       tx,
     );
 
-    return { applied: true, refunded: false } as const;
+    return { applied: true, refunded: false, settled, pooled } as const;
   });
 
+  if (outcome.applied && outcome.settled) {
+    // A receipt, not an advert: the student is told the money landed and which
+    // order it belongs to. Sent once, because only the call that actually moved
+    // the row out of PENDING reaches this line (PRD §52).
+    await notify({
+      type: "PAYMENT_SETTLED",
+      recipients: [{ userId: outcome.settled.studentId, campusId: outcome.settled.campusId }],
+      facts: {
+        reference: outcome.settled.reference,
+        amountKobo: outcome.settled.amountKobo,
+      },
+      entityType: "Order",
+      entityId: outcome.settled.orderId,
+    });
+  }
+
+  if (outcome.applied) {
+    for (const delivery of outcome.pooled) {
+      // Settling the fee is what puts the job in front of agents, so the pool is
+      // told here rather than inside the transaction that took the money.
+      await notifyPoolOfDelivery(delivery);
+    }
+  }
+
   if (!outcome.refunded) return outcome;
+
+
 
   // The money is real but the thing it paid for is gone. Refund outside the
   // transaction, then record it; a refund that fails leaves the payment SUCCESS-

@@ -1,6 +1,7 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-15 (end of Phase 8). Written so work can continue on a
+Last updated: 2026-08-15 (end of Phase 9). Written so work can continue on a
+
 
 
 second machine (or by another developer/agent) without re-reading the whole
@@ -10,7 +11,8 @@ codebase.
 Source of truth for scope: `docs/PRD.docx`. Build order and
 
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-8-report.md`.
+`docs/phase-0-report.md` … `docs/phase-9-report.md`.
+
 
 
 
@@ -30,13 +32,15 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 6 | Delivery engine: agents, pool, atomic assignment, 15-minute pickup rule, destination lock, cancellations, returns | Done |
 | 7 | Delivery hand-over code & goods-payment unlock, payment timeout | Done |
 | 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | Done |
-| 9 | Notifications & PWA: manifest, service worker, installability, push | **Next** |
-| 10 | Ratings | Not started |
+| 9 | Notifications & PWA: notification catalogue, in-app inbox, web push, manifest, service worker, offline page, installability | Done |
+| 10 | Ratings | **Next** |
+
 | 11 | Disputes & refunds | Not started |
 | 12 | Admin analytics | Not started |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 162 tests / 13 files passing.
+Verification at handover: `npm run test` → 178 tests / 14 files passing.
+
 
 `npm run lint` → clean. `npm run build` → compiles and typechecks with no errors
 (a full Turbopack production build takes several minutes on a laptop; be patient
@@ -141,9 +145,15 @@ Notes
 - `PAYSTACK_SECRET_KEY` — required for payments (Phase 8). Unset means every
   payment route answers 503 `PAYMENTS_NOT_CONFIGURED`.
 
-Not needed until their phase: `VAPID_*` (Phase 9),
-`MAP_PROVIDER_API_KEY` (only if a real routing provider replaces `haversine` in
-`lib/delivery/pricing.ts`).
+- `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` — web push
+  (Phase 9). Generate with `npx web-push generate-vapid-keys`. Optional: with them
+  unset the app logs once and runs with in-app notifications only.
+- `CRON_SECRET` — bearer token for `/api/cron/sweep`. Unset means the sweep
+  refuses every request rather than running unauthenticated.
+
+Not needed until their phase: `MAP_PROVIDER_API_KEY` (only if a real routing
+provider replaces `haversine` in `lib/delivery/pricing.ts`).
+
 
 Both machines must point at the **same** Neon database, or each will need its own
 campus/admin seed data.
@@ -216,37 +226,49 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 9 should do next
+## 5. What Phase 10 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-Phase 9 is notifications and the PWA (PRD §51–55). Every event worth telling
-someone about already exists and is already written inside a transaction, so the
-work is a notification *service* the existing services call — not new business
-logic.
+Phase 10 is ratings (PRD §56–59). The delivered order is now a real, provable
+event — `HANDOVER_VERIFIED` plus a settled goods payment — so a rating can be
+tied to a transaction rather than to an opinion.
 
-1. **Schema**: `Notification` (campus-scoped, per user, read/unread) and
-   `PushSubscription` (endpoint + keys per device). MVP channels are in-app and
-   push only; there is no email sender.
-2. **Service**: one `notify(...)` entry point, called from the named operations
-   that already exist — order placed, vendor order accepted, delivery pooled and
-   accepted, agent arrived, hand-over verified, payment settled, goods returned.
-   Sending must never break the operation that triggered it, the way `recordAudit`
-   does not.
-3. **Push**: web-push with `VAPID_*`. A subscription that the browser has revoked
-   comes back as 404/410 — delete it rather than retrying forever.
-4. **PWA**: manifest, service worker, installability. Check the agent console
-   works offline enough to be honest about it (read-only, no stale actions).
-5. **Two schedulers are overdue and belong here** (see gaps): `expirePickups` and
-   `expireGoodsPayments` need Vercel cron entries. A payment window that only
-   closes when someone happens to look is not a rule.
-6. Tests: notification fan-out per event, a revoked subscription being pruned, and
-   that a failed send does not roll back the delivery or payment that caused it.
+1. **Schema**: a rating per `VendorOrder` (the store) and per `Delivery` (the
+   agent), each unique on `(rater, subject)` so nobody rates twice. Keep the
+   aggregate on `VendorProfile` / `AgentProfile` rather than recomputing an average
+   over every row on each marketplace query.
+2. **Eligibility is the rule worth guarding**: only the student on the order, only
+   after hand-over, and within a window. Put it in the service, not the UI.
+3. **Marketplace**: add the "sort by rating" option and rating filter that were
+   deliberately left out of Phase 4 (see gaps).
+4. **Notifications**: `notify()` and the catalogue already exist. Adding a "rate
+   your order" nudge is a new `NotificationType` plus one renderer — the compiler
+   will demand the copy.
+5. Tests: eligibility (before hand-over, twice, by a stranger), and the aggregate
+   staying correct as ratings arrive.
 
-Acceptance (PRD Phase 9): the app installs on Android, a student receives a push
-when an agent arrives, and an agent receives one when a job enters their campus
-pool.
+Acceptance (PRD Phase 10): a student who received an order can rate the store and
+the agent once each, and those averages are visible in the marketplace.
+
+### Notifications: what a second machine needs to know
+
+- **All copy lives in `lib/notifications/messages.ts`** as pure functions. Change
+  wording there, not in a component. The `Record<NotificationType, …>` means a new
+  enum value without copy is a compile error, which is intentional.
+- **`notify()` is called from services, never from route handlers**, so an event
+  triggered by cron notifies exactly like one triggered by a request.
+- **A push must never fail an operation.** The row is the record; the push is a
+  copy. `sendPush` never throws.
+- **Push is optional.** No VAPID keys means in-app only, logged once at startup.
+- **The bell polls once a minute** and pauses while the tab is hidden. This is a
+  deliberate choice over websockets: the news arrives in minutes, and a campus on
+  patchy 3G keeps a poll but loses a socket.
+- **`/api/cron/sweep`** now runs `expirePickups` and `expireGoodsPayments` and
+  prunes read notifications. It needs a Vercel cron entry plus `CRON_SECRET`;
+  without the schedule the timeout rules are still only enforced opportunistically.
+
 
 ### Payments: what a second machine needs to know
 
@@ -280,15 +302,16 @@ pool.
 - Rule 27 escalates on cancellation count only, and the count never decays. If
   agents are punished for a bad week, give it a window (cancellations in the last
   N days) — the `DeliveryEvent` rows already carry the timestamps to do it.
-- `expirePickups` is called opportunistically from `listPool`, so a campus with no
-  agents reading the pool never expires anything. Wire it to a scheduler
-  (Vercel cron) before the pilot.
-- The agent console reflects deadlines only when the page is refreshed; there is
-  no live countdown or push. Phase 9 owns that.
-- `expireGoodsPayments` has no trigger at all — unlike `expirePickups` there is no
-  natural read path to hang it off. It needs the same Vercel cron entry, or an
-  unpaid hand-over sits in `PAYMENT_PENDING` until someone tries to pay and is
-  told the window closed.
+- `expirePickups` and `expireGoodsPayments` are now both called by
+  `/api/cron/sweep`, but **nothing schedules it yet**. Add the Vercel cron entry
+  and `CRON_SECRET` before the pilot; until then `expirePickups` still only runs
+  opportunistically from `listPool` (so a campus with no agents reading the pool
+  expires nothing) and an unpaid hand-over sits in `PAYMENT_PENDING` until someone
+  tries to pay.
+- The agent console still has no live countdown; deadlines update on refresh or on
+  the notification bell's poll. Push covers arrival and hand-over, which is the
+  part that mattered.
+
 - The hand-over code is shown in the issuing response and never again. There is
   no "resend" that keeps the old code, by design; if a student loses it they must
   issue a new one, which invalidates the previous code.

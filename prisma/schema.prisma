@@ -208,10 +208,13 @@ model Campus {
   deliveries        Delivery[]
   deliveryEvents    DeliveryEvent[]
   payments          Payment[]
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
 
   @@index([status])
 
 }
+
 
 /// Per-campus operational configuration (PRD §18, §29, §35, §47).
 ///
@@ -299,10 +302,13 @@ model User {
   reviewedAgents    DeliveryAgentProfile[] @relation("AgentProfileReviewer")
   deliveries        Delivery[]             @relation("DeliveryAgent")
   deliveryEvents    DeliveryEvent[]        @relation("DeliveryEventActor")
+  notifications     Notification[]         @relation("NotificationRecipient")
+  pushSubscriptions PushSubscription[]     @relation("PushSubscriptionUser")
 
   @@index([campusId, role])
   @@index([role])
 }
+
 
 model Session {
   id        String   @id @default(cuid())
@@ -1292,4 +1298,137 @@ model PaymentEvent {
   @@index([paymentId, createdAt])
   @@index([eventType, createdAt])
 }
+
+// ---------------------------------------------------------------------------
+// Notifications and push (PRD §51–55, Phase 9)
+// ---------------------------------------------------------------------------
+
+/// What a notification is about.
+///
+/// An enum rather than a free string: the set of things worth interrupting
+/// someone for is a product decision, and naming them here is what stops a
+/// twelfth "FYI" from being invented in a route handler. Each value maps to one
+/// already-existing named operation (PRD §52).
+enum NotificationType {
+  /// Vendor: a new order landed in your queue.
+  ORDER_PLACED
+  /// Student: the vendor accepted and is preparing your order.
+  VENDOR_ORDER_PREPARING
+  /// Student: your package is ready and waiting for an agent.
+  VENDOR_ORDER_READY
+  /// Student + vendor: the delivery fee settled, the job is in the pool.
+  DELIVERY_POOLED
+  /// Agents on duty: a job entered your campus pool.
+  DELIVERY_AVAILABLE
+  /// Student + vendor: an agent claimed the job.
+  DELIVERY_ACCEPTED
+  /// Student: the agent has the package.
+  DELIVERY_PICKED_UP
+  /// Student: the agent is at your destination — the push that matters most.
+  DELIVERY_ARRIVED
+  /// Student: the hand-over was confirmed, so the goods must now be paid for.
+  HANDOVER_VERIFIED
+  /// Student: payment landed. Vendor: your sale completed.
+  PAYMENT_SETTLED
+  /// Student + vendor: the goods went back (unpaid window, or absent student).
+  DELIVERY_RETURNED
+  /// Student + vendor: the delivery was cancelled or the pickup window lapsed.
+  DELIVERY_CANCELLED
+  /// Applicant: an admin decided on your student, vendor or agent application.
+  APPLICATION_REVIEWED
+}
+
+/// One in-app notification for one user (PRD §51, §53).
+///
+/// Campus-scoped like everything else, so a campus's activity cannot be read
+/// from another campus's inbox. The row is the record; a push message is a best
+/// effort *copy* of it, which is why `pushedAt` is nullable and failure to send
+/// is not failure to notify.
+///
+/// `entityType`/`entityId` and `href` are stored rather than derived: a
+/// notification has to survive the thing it points at changing state, and
+/// re-deriving a link months later from an enum would be guesswork.
+model Notification {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  /// Who is being told. Cascade: an erased account keeps no inbox.
+  userId String
+  user   User   @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+
+  type NotificationType
+
+  /// Rendered server-side at send time, so a later rename of a store or a
+  /// product cannot rewrite what someone was told.
+  title String
+  body  String
+
+  /// Where the notification takes you. A relative path, never an absolute URL:
+  /// the origin belongs to the deployment, not to the row.
+  href String?
+
+  /// The thing this is about, for support and for de-duplication by hand.
+  entityType String?
+  entityId   String?
+
+  readAt DateTime?
+
+  /// When a push copy was successfully handed to a push service. Null means
+  /// in-app only — either no subscription, or every send failed.
+  pushedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  /// The inbox query: one user's notifications, newest first.
+  @@index([userId, createdAt])
+  /// The unread badge.
+  @@index([userId, readAt])
+  @@index([campusId, createdAt])
+  @@index([entityType, entityId])
+}
+
+/// One browser or installed PWA that has agreed to receive push (PRD §54).
+///
+/// Per device, not per user: the same student may have the app on a phone and a
+/// laptop, and revoking one must not silence the other. `endpoint` is unique
+/// platform-wide because it is the push service's own identifier for that
+/// device — re-subscribing with the same endpoint is an update, not a duplicate.
+///
+/// A push service answering 404/410 means the subscription is dead; the service
+/// deletes the row rather than retrying it forever.
+model PushSubscription {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation("PushSubscriptionUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Denormalised from the user so a campus-wide fan-out does not have to join.
+  /// Null only for a Super Admin, who has no campus.
+  campusId String?
+  campus   Campus? @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  /// The push service URL for this device.
+  endpoint String @unique
+  /// Public key of the device's key pair (Web Push `p256dh`).
+  p256dh   String
+  /// Shared authentication secret (Web Push `auth`).
+  auth     String
+
+  /// Only for support: which device stopped receiving pushes.
+  userAgent String?
+
+  /// Last time a push was accepted by the service for this device.
+  lastUsedAt DateTime?
+  /// Consecutive send failures that were not fatal. A fatal one deletes the row.
+  failureCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([campusId])
+}
+
 

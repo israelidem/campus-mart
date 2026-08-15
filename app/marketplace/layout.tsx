@@ -1,7 +1,10 @@
 import Link from "next/link";
 
+import { NotificationMenu } from "@/components/notifications/notification-menu";
+
 /** Mobile-first shell for marketplace screens. */
 export default function MarketplaceLayout({ children }: { children: React.ReactNode }) {
+
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-4xl flex-col gap-6 p-4">
       <header className="flex items-center justify-between">
@@ -22,8 +25,11 @@ export default function MarketplaceLayout({ children }: { children: React.ReactN
             Sell
           </Link>
 
+          {/* Server component: renders nothing at all for a signed-out visitor. */}
+          <NotificationMenu />
         </nav>
       </header>
+
       <main className="flex-1">{children}</main>
     </div>
   );

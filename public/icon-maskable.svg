@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Campus Mart">
+  <!--
+    Maskable variant. Android may crop this to a circle, a squircle or a rounded
+    square, so the mark sits inside the 80% safe zone and the green bleeds to all
+    four edges: whatever shape the launcher cuts, it cuts green, not white.
+  -->
+  <rect width="512" height="512" fill="#0f7a4d" />
+  <circle cx="256" cy="256" r="132" fill="none" stroke="#f6f7f3" stroke-width="14" opacity="0.55" />
+  <text
+    x="256"
+    y="256"
+    fill="#f6f7f3"
+    font-family="Georgia, 'Times New Roman', serif"
+    font-size="146"
+    font-weight="700"
+    letter-spacing="-5"
+    text-anchor="middle"
+    dominant-baseline="central"
+  >CM</text>
+</svg>

@@ -7,7 +7,9 @@ import { distanceBetween, quoteDeliveryFee } from "@/lib/delivery/pricing";
 
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "@/lib/errors";
 import { applyBasisPoints, multiplyKobo, sumKobo, type Kobo } from "@/lib/money";
+import { notify } from "@/lib/notifications/notification-service";
 import { requireVerifiedStudent } from "@/lib/orders/cart-service";
+
 import { generateOrderReference } from "@/lib/orders/order-reference";
 import { requireApprovedVendor } from "@/lib/vendors/vendor-service";
 import type { CheckoutInput, OrderCancelInput, VendorOrderStatusUpdateInput } from "@/validations/order";
@@ -157,7 +159,12 @@ function toOrderView(order: OrderRow): OrderView {
 export async function checkout(actor: Actor, input: CheckoutInput): Promise<OrderView> {
   const { campusId } = await requireVerifiedStudent(actor);
 
+  // Collected inside the transaction, announced after it commits: a push must
+  // never be sent for an order that then rolls back (PRD §52).
+  const vendorsToNotify: { userId: string; reference: string; subtotalKobo: Kobo }[] = [];
+
   const orderId = await prisma.$transaction(async (tx) => {
+
     const cart = await tx.cart.findUnique({
       where: { studentId_campusId: { studentId: actor.userId, campusId } },
       select: {
@@ -178,8 +185,15 @@ export async function checkout(actor: Actor, input: CheckoutInput): Promise<Orde
                 deletedAt: true,
                 vendorProfileId: true,
                 vendorProfile: {
-                  select: { id: true, storeName: true, status: true, acceptingOrders: true },
+                  select: {
+                    id: true,
+                    userId: true,
+                    storeName: true,
+                    status: true,
+                    acceptingOrders: true,
+                  },
                 },
+
               },
             },
           },
@@ -222,10 +236,14 @@ export async function checkout(actor: Actor, input: CheckoutInput): Promise<Orde
       quantity: number;
       lineTotalKobo: Kobo;
     };
-    const groups = new Map<string, { storeName: string; items: PlannedItem[] }>();
+    const groups = new Map<
+      string,
+      { storeName: string; vendorUserId: string; items: PlannedItem[] }
+    >();
 
     for (const item of cart.items) {
       const { product } = item;
+
       if (product.deletedAt !== null || !product.isAvailable) {
         throw new ConflictError(`${product.name} is no longer available`);
       }
@@ -240,8 +258,10 @@ export async function checkout(actor: Actor, input: CheckoutInput): Promise<Orde
 
       const group = groups.get(product.vendorProfileId) ?? {
         storeName: product.vendorProfile.storeName,
-        items: [],
+        vendorUserId: product.vendorProfile.userId,
+        items: [] as PlannedItem[],
       };
+
       group.items.push({
         productId: product.id,
         productName: product.name,
@@ -260,10 +280,15 @@ export async function checkout(actor: Actor, input: CheckoutInput): Promise<Orde
     const distanceMeters = distanceBetween(campus, location);
     const { feeKobo: deliveryFeeKobo } = quoteDeliveryFee(distanceMeters, settings);
 
+    // Generated once and reused: the reference is what every notification and
+    // support conversation calls this order.
+    const reference = generateOrderReference();
+
     const order = await tx.order.create({
       data: {
-        reference: generateOrderReference(),
+        reference,
         campusId,
+
         studentId: actor.userId,
         deliveryLocationId: location.id,
         deliveryLocationName: location.name,
@@ -296,8 +321,15 @@ export async function checkout(actor: Actor, input: CheckoutInput): Promise<Orde
         select: { id: true },
       });
 
+      vendorsToNotify.push({
+        userId: group.vendorUserId,
+        reference,
+        subtotalKobo: vendorSubtotalKobo,
+      });
+
       for (const item of group.items) {
         await tx.orderItem.create({
+
           data: {
             vendorOrderId: vendorOrder.id,
             campusId,
@@ -363,8 +395,21 @@ export async function checkout(actor: Actor, input: CheckoutInput): Promise<Orde
     return order.id;
   });
 
+  // Post-commit: each store hears about its own slice and its own subtotal, and
+  // nothing about the rest of the invoice (PRD §27).
+  for (const vendor of vendorsToNotify) {
+    await notify({
+      type: "ORDER_PLACED",
+      recipients: [{ userId: vendor.userId, campusId }],
+      facts: { reference: vendor.reference, amountKobo: vendor.subtotalKobo },
+      entityType: "Order",
+      entityId: orderId,
+    });
+  }
+
   return getOrderForStudent(actor, orderId);
 }
+
 
 /** The student's own orders, newest first. */
 export async function listStudentOrders(actor: Actor): Promise<OrderView[]> {
@@ -496,12 +541,19 @@ export async function updateVendorOrderStatus(
 ): Promise<{ id: string; status: string }> {
   const vendor = await requireApprovedVendor(actor);
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const existing = await tx.vendorOrder.findFirst({
       where: { id: vendorOrderId, vendorProfileId: vendor.id },
-      select: { id: true, status: true, campusId: true },
+      select: {
+        id: true,
+        status: true,
+        campusId: true,
+        vendorProfile: { select: { storeName: true } },
+        order: { select: { id: true, reference: true, studentId: true } },
+      },
     });
     if (!existing) throw new NotFoundError("Order not found");
+
 
     const allowed = VENDOR_ORDER_TRANSITIONS[existing.status] ?? [];
     if (!allowed.includes(input.status)) {
@@ -515,6 +567,15 @@ export async function updateVendorOrderStatus(
       data: { status: input.status },
       select: { id: true, status: true },
     });
+
+    const audience = {
+      studentId: existing.order.studentId,
+      campusId: existing.campusId,
+      reference: existing.order.reference,
+      storeName: existing.vendorProfile.storeName,
+      orderId: existing.order.id,
+    };
+
 
     // Marking a package ready is what creates its delivery, in the same
     // transaction: a vendor order can never be ready without a delivery record,
@@ -538,9 +599,31 @@ export async function updateVendorOrderStatus(
       tx,
     );
 
-    return updated;
+    return { ...updated, audience };
   });
+
+  // Post-commit, and only for the two transitions a student cares about. The
+  // store's own name is included because a student with three orders open needs
+  // to know which one moved.
+  const type = result.status === "PREPARING" ? "VENDOR_ORDER_PREPARING" : "VENDOR_ORDER_READY";
+  if (result.status === "PREPARING" || result.status === "READY_FOR_PICKUP") {
+    await notify({
+      type,
+      recipients: [
+        { userId: result.audience.studentId, campusId: result.audience.campusId },
+      ],
+      facts: {
+        reference: result.audience.reference,
+        storeName: result.audience.storeName,
+      },
+      entityType: "Order",
+      entityId: result.audience.orderId,
+    });
+  }
+
+  return { id: result.id, status: result.status };
 }
+
 
 /**
  * Cancels a whole invoice and returns its reserved stock.

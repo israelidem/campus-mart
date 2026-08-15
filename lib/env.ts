@@ -40,6 +40,16 @@ const serverSchema = z.object({
   VAPID_PRIVATE_KEY: z.string().optional(),
   VAPID_SUBJECT: z.string().optional(),
 
+  /**
+   * Shared secret the scheduler presents to the sweep endpoint.
+   *
+   * The sweeps expire pickups and payment windows, so an anonymous caller must
+   * not be able to run them. Optional here and required by the route: a machine
+   * that never runs the cron should still boot.
+   */
+  CRON_SECRET: z.string().optional(),
+
+
   MAP_PROVIDER: z.enum(["haversine", "google", "mapbox"]).default("haversine"),
   MAP_PROVIDER_API_KEY: z.string().optional(),
 

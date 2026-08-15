@@ -81,9 +81,25 @@ export async function apiPut<T>(path: string, body?: unknown): Promise<T> {
   );
 }
 
-export async function apiDelete<T>(path: string): Promise<T> {
-  return unwrap<T>(await fetch(path, { method: "DELETE", credentials: "same-origin" }));
+/**
+ * DELETE, optionally with a body.
+ *
+ * A body on DELETE is unusual but correct here: a push endpoint is a 500-character
+ * URL that identifies a device rather than a resource path, and putting it in the
+ * query string would leak it into logs.
+ */
+export async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
+  return unwrap<T>(
+    await fetch(path, {
+      method: "DELETE",
+      credentials: "same-origin",
+      ...(body === undefined
+        ? {}
+        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+    }),
+  );
 }
+
 
 export async function apiUpload<T>(path: string, form: FormData): Promise<T> {
 
