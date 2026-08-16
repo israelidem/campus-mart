@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useState } from "react";
 
 
+import { RatingBadge } from "@/components/ratings/star-rating";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Field, Input } from "@/components/ui/field";
@@ -25,7 +26,15 @@ export type BrowseProduct = {
   inStock: boolean;
   imageId: string | null;
   category: { id: string; name: string; slug: string } | null;
-  vendor: { id: string; storeName: string; slug: string; acceptingOrders: boolean };
+  vendor: {
+    id: string;
+    storeName: string;
+    slug: string;
+    acceptingOrders: boolean;
+    /** Formatted by the server; `null` means the store has no ratings yet. */
+    ratingAverage: string | null;
+    ratingCount: number;
+  };
 };
 
 export type BrowsePage = {
@@ -39,9 +48,23 @@ export type BrowsePage = {
 const SORT_LABELS: Record<string, string> = {
   NEWEST: "Newest",
   POPULAR: "Most popular",
+  TOP_RATED: "Top rated",
   PRICE_ASC: "Price: low to high",
   PRICE_DESC: "Price: high to low",
 };
+
+/**
+ * The rating filter offers whole stars only.
+ *
+ * "At least 4 stars" is the question a buyer actually asks, and a floor keeps the
+ * option honest: any floor excludes stores nobody has rated yet, so it is opt-in
+ * and never the default.
+ */
+const MIN_RATING_OPTIONS = [
+  { value: "", label: "Any rating" },
+  { value: "4", label: "4 stars & up" },
+  { value: "3", label: "3 stars & up" },
+];
 
 export function ProductBrowser({
   initialPage,
@@ -54,6 +77,7 @@ export function ProductBrowser({
   const [q, setQ] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [sort, setSort] = useState("NEWEST");
+  const [minRating, setMinRating] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -63,8 +87,16 @@ export function ProductBrowser({
    * Every request starts at page 1 unless a page is named.
    */
   const load = useCallback(
-    async (overrides: { q?: string; categoryId?: string; sort?: string; page?: number } = {}) => {
-      const next = { q, categoryId, sort, page: 1, ...overrides };
+    async (
+      overrides: {
+        q?: string;
+        categoryId?: string;
+        sort?: string;
+        minRating?: string;
+        page?: number;
+      } = {},
+    ) => {
+      const next = { q, categoryId, sort, minRating, page: 1, ...overrides };
 
       setLoading(true);
       setError(null);
@@ -72,6 +104,7 @@ export function ProductBrowser({
         const params = new URLSearchParams({ sort: next.sort, page: String(next.page) });
         if (next.q.trim()) params.set("q", next.q.trim());
         if (next.categoryId) params.set("categoryId", next.categoryId);
+        if (next.minRating) params.set("minRating", next.minRating);
 
         setResult(await apiGet<BrowsePage>(`/api/marketplace/products?${params.toString()}`));
       } catch (caught) {
@@ -82,7 +115,7 @@ export function ProductBrowser({
         setLoading(false);
       }
     },
-    [categoryId, q, sort],
+    [categoryId, minRating, q, sort],
   );
 
 
@@ -141,7 +174,24 @@ export function ProductBrowser({
           </select>
         </Field>
 
-        <Button type="submit" isLoading={loading} className="sm:col-span-3">
+        <Field id="minRating" label="Store rating">
+          <select
+            value={minRating}
+            onChange={(event) => {
+              setMinRating(event.target.value);
+              void load({ minRating: event.target.value });
+            }}
+            className="h-11 w-full rounded-xl border border-current/15 bg-transparent px-3 text-base"
+          >
+            {MIN_RATING_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <Button type="submit" isLoading={loading} className="sm:col-span-2">
           Search
         </Button>
       </form>
@@ -186,6 +236,15 @@ export function ProductBrowser({
                   {product.vendor.storeName}
                   {product.category ? ` · ${product.category.name}` : ""}
                 </p>
+                {/*
+                  The store's rating, not the product's: a rating is given for a
+                  delivered order (PRD §57), so attaching it to an item would
+                  claim a precision the data does not have.
+                */}
+                <RatingBadge
+                  average={product.vendor.ratingAverage}
+                  count={product.vendor.ratingCount}
+                />
                 {!product.inStock ? <p className="text-xs opacity-70">Out of stock</p> : null}
               </Link>
             </Card>

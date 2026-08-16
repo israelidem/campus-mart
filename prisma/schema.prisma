@@ -210,6 +210,7 @@ model Campus {
   payments          Payment[]
   notifications     Notification[]
   pushSubscriptions PushSubscription[]
+  ratings           Rating[]
 
   @@index([status])
 
@@ -304,6 +305,8 @@ model User {
   deliveryEvents    DeliveryEvent[]        @relation("DeliveryEventActor")
   notifications     Notification[]         @relation("NotificationRecipient")
   pushSubscriptions PushSubscription[]     @relation("PushSubscriptionUser")
+  ratingsGiven      Rating[]               @relation("RatingRater")
+  ratingsModerated  Rating[]               @relation("RatingModerator")
 
   @@index([campusId, role])
   @@index([role])
@@ -554,16 +557,34 @@ model VendorProfile {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  /// Rating aggregates (PRD §24, Phase 10).
+  ///
+  /// Denormalised counters rather than a live AVG(): the marketplace sorts and
+  /// filters on them on every browse, and recomputing an average across a
+  /// campus's whole rating history for each page would not survive a busy
+  /// evening. `ratingSum` is kept alongside the count so the average is always
+  /// re-derivable exactly, and `ratingAverageHundredths` exists so "top rated"
+  /// can be an indexed sort instead of an in-memory one. All three move in the
+  /// same transaction as the rating that changed them.
+  ratingCount             Int @default(0)
+  /// Sum of every visible score, so the average never drifts from rounding.
+  ratingSum               Int @default(0)
+  /// Average × 100 (450 = 4.50 stars). Zero when there are no ratings yet.
+  ratingAverageHundredths Int @default(0)
+
   documents      OnboardingDocument[]
   operatingHours VendorOperatingHours[]
   products       Product[]
   inventory      InventoryTransaction[]
   vendorOrders   VendorOrder[]
+  ratings        Rating[]
 
   /// Two stores on the same campus cannot share a name (Rule 2 scoping).
   @@unique([campusId, slug])
   @@index([campusId, status])
   @@index([status, submittedAt])
+  /// The "top rated stores" browse order (PRD §24).
+  @@index([campusId, status, ratingAverageHundredths])
 }
 
 /// One row per weekday per vendor (PRD §23).
@@ -1025,14 +1046,25 @@ model DeliveryAgentProfile {
   /// Reason shown to the agent for a rejection, correction or suspension.
   reviewNote   String?
 
+  /// Rating aggregates, kept exactly as the vendor's are (Phase 10). An agent's
+  /// average is what an admin looks at before acting on a complaint, so it is
+  /// maintained in the same transaction as the rating rather than reported by a
+  /// nightly job.
+  ratingCount             Int @default(0)
+  ratingSum               Int @default(0)
+  /// Average × 100 (450 = 4.50 stars). Zero until the first rating.
+  ratingAverageHundredths Int @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   deliveries Delivery[]
+  ratings    Rating[]
 
   @@index([campusId, status])
   @@index([campusId, status, isOnDuty])
   @@index([status, submittedAt])
+  @@index([campusId, ratingAverageHundredths])
 }
 
 /// The delivery of one vendor's package (PRD §37).
@@ -1131,6 +1163,7 @@ model Delivery {
 
   events   DeliveryEvent[]
   payments Payment[]
+  ratings  Rating[]
 
   /// The pool query: available jobs on a campus, optionally narrowed to the
 
@@ -1429,6 +1462,93 @@ model PushSubscription {
 
   @@index([userId])
   @@index([campusId])
+}
+
+// ---------------------------------------------------------------------------
+// Ratings and reviews (PRD §24, §57–59, Phase 10)
+// ---------------------------------------------------------------------------
+
+/// Who is being rated.
+///
+/// One table with a subject discriminator rather than `VendorRating` and
+/// `AgentRating`: the rules (one rating per delivery per subject, 1–5, editable
+/// for a window, hideable by an admin) are identical, and duplicating them would
+/// mean maintaining the same moderation and aggregate logic twice.
+enum RatingSubject {
+  /// The store that sold the goods.
+  VENDOR
+  /// The agent who carried them.
+  DELIVERY_AGENT
+}
+
+/// One student's rating of a store or an agent for one completed delivery
+/// (PRD §57).
+///
+/// The delivery is the unit of experience, not the order: a two-store invoice is
+/// two packages, possibly two agents, and one score for the pair would be
+/// meaningless. `@@unique([deliveryId, subject])` is what makes "one rating per
+/// delivery per subject" a database guarantee rather than an application habit.
+///
+/// A rating is only accepted after the delivery COMPLETED, because a score given
+/// before the goods arrive is not a report of anything. The window for editing it
+/// is a policy constant (see lib/ratings/rating-policy), and the row keeps
+/// `updatedAt` so an edited rating is visibly an edit.
+model Rating {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Cascade)
+
+  /// The completed delivery being rated. Cascade: a deleted delivery has no
+  /// experience left to score.
+  deliveryId String
+  delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  subject RatingSubject
+
+  /// The student who gave it. Cascade with the account: an erased student's
+  /// opinion is erased with them, and the aggregates are corrected in the same
+  /// transaction by the service that removes it.
+  raterId String
+  rater   User   @relation("RatingRater", fields: [raterId], references: [id], onDelete: Cascade)
+
+  /// Set when subject = VENDOR. Exactly one of these two is set; the service
+  /// enforces the pairing, because a partial unique across two nullable columns
+  /// is not expressible here.
+  vendorProfileId String?
+  vendorProfile   VendorProfile? @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  /// Set when subject = DELIVERY_AGENT.
+  agentProfileId String?
+  agentProfile   DeliveryAgentProfile? @relation(fields: [agentProfileId], references: [id], onDelete: Cascade)
+
+  /// 1–5 whole stars. Validated at the edge and again in the service.
+  score Int
+
+  /// Optional written review. Trimmed and length-capped before it is stored.
+  comment String?
+
+  // Moderation (PRD §59) -------------------------------------------------
+  /// Set when a Campus Admin hides the rating. A hidden rating still exists —
+  /// it is excluded from the aggregates and from public reads, so hiding is
+  /// reversible and auditable, unlike deletion.
+  hiddenAt     DateTime?
+  hiddenById   String?
+  hiddenBy     User?     @relation("RatingModerator", fields: [hiddenById], references: [id], onDelete: SetNull)
+  /// Why it was hidden, kept for the audit trail rather than for the student.
+  hiddenReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// One score per subject per delivery, enforced by the database.
+  @@unique([deliveryId, subject])
+  /// A store's or an agent's own reviews, newest first.
+  @@index([vendorProfileId, hiddenAt, createdAt])
+  @@index([agentProfileId, hiddenAt, createdAt])
+  /// The admin moderation queue for a campus.
+  @@index([campusId, hiddenAt, createdAt])
+  @@index([raterId, createdAt])
 }
 
 

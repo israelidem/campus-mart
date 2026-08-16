@@ -1,6 +1,6 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-15 (end of Phase 9). Written so work can continue on a
+Last updated: 2026-08-16 (end of Phase 10). Written so work can continue on a
 
 
 
@@ -11,7 +11,7 @@ codebase.
 Source of truth for scope: `docs/PRD.docx`. Build order and
 
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-9-report.md`.
+`docs/phase-0-report.md` … `docs/phase-10-report.md`.
 
 
 
@@ -33,13 +33,12 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 7 | Delivery hand-over code & goods-payment unlock, payment timeout | Done |
 | 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | Done |
 | 9 | Notifications & PWA: notification catalogue, in-app inbox, web push, manifest, service worker, offline page, installability | Done |
-| 10 | Ratings | **Next** |
-
-| 11 | Disputes & refunds | Not started |
+| 10 | Ratings: per-delivery vendor + agent ratings, 24-hour edit window, admin moderation, stored aggregates, marketplace "top rated" sort and rating filter | Done |
+| 11 | Disputes & refunds | **Next** |
 | 12 | Admin analytics | Not started |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 178 tests / 14 files passing.
+Verification at handover: `npm run test` → 207 tests / 15 files passing.
 
 
 `npm run lint` → clean. `npm run build` → compiles and typechecks with no errors
@@ -226,31 +225,59 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 10 should do next
+## 5. What Phase 11 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-Phase 10 is ratings (PRD §56–59). The delivered order is now a real, provable
-event — `HANDOVER_VERIFIED` plus a settled goods payment — so a rating can be
-tied to a transaction rather than to an opinion.
+Phase 11 is disputes and refunds (PRD §60–63). Everything it needs already exists
+in a usable state: `refundPayment` performs a Paystack refund idempotently, the
+delivery state machine records why a delivery ended badly, and Phase 10 drew the
+line that makes disputes necessary — a cancelled or returned delivery **cannot** be
+rated, precisely because a complaint is not a score.
 
-1. **Schema**: a rating per `VendorOrder` (the store) and per `Delivery` (the
-   agent), each unique on `(rater, subject)` so nobody rates twice. Keep the
-   aggregate on `VendorProfile` / `AgentProfile` rather than recomputing an average
-   over every row on each marketplace query.
-2. **Eligibility is the rule worth guarding**: only the student on the order, only
-   after hand-over, and within a window. Put it in the service, not the UI.
-3. **Marketplace**: add the "sort by rating" option and rating filter that were
-   deliberately left out of Phase 4 (see gaps).
-4. **Notifications**: `notify()` and the catalogue already exist. Adding a "rate
-   your order" nudge is a new `NotificationType` plus one renderer — the compiler
-   will demand the copy.
-5. Tests: eligibility (before hand-over, twice, by a stranger), and the aggregate
-   staying correct as ratings arrive.
+1. **Schema**: a dispute belongs to a `VendorOrder` (what was bought) and may name
+   a `Delivery` (how it went wrong). It needs a status the admin drives, a reason
+   the student picks from a closed list, free text, and evidence uploads through
+   the existing private storage.
+2. **The rule worth guarding is the window**: how long after a delivery may a
+   student still dispute it, and what happens to a dispute filed on an order whose
+   money has already settled to the vendor. Put it in a pure policy module the way
+   `rating-policy.ts` is, so the deadline is testable without a database.
+3. **Refunds**: `refundPayment` is full-amount only today. Partial refunds are the
+   real work here — the split between platform commission and vendor share has to
+   be decided before money moves, not after, and `lib/payments/settlement.ts`
+   already owns that arithmetic.
+4. **Notifications**: adding a dispute type is a new `NotificationType` plus one
+   renderer; the exhaustive `Record` will refuse to compile without the copy.
+5. Tests: the window open and shut, a dispute by a stranger, a partial refund that
+   must not exceed what was actually paid, and idempotency on a retried refund.
 
-Acceptance (PRD Phase 10): a student who received an order can rate the store and
-the agent once each, and those averages are visible in the marketplace.
+Acceptance (PRD Phase 11): a student can raise a dispute on a delivered or failed
+order, an admin can resolve it, and a resolution that owes money issues a real
+Paystack refund exactly once.
+
+### Ratings: what a second machine needs to know
+
+- **`lib/ratings/rating-policy.ts` is pure and is the source of truth** for scores,
+  the 24-hour edit window and every aggregate transition. The clock is always a
+  parameter, never `new Date()` inside the module — that is what makes the window
+  testable at the millisecond boundary.
+- **Aggregates are `count` + `sum`, with the average derived.** Never write
+  `ratingAverageHundredths` from anything but `applyNewRating` /
+  `applyEditedRating` / `applyRemovedRating` / `applyRestoredRating`, and never
+  outside the transaction that writes the rating row. A rating and the average it
+  produced must not be able to disagree.
+- **An edit moves the sum, not the count.** If you see the count change on an edit,
+  that is the bug.
+- **Only `COMPLETED` deliveries are rateable.** `RETURNED` and `CANCELLED` are
+  Phase 11's territory.
+- **`formatAverage` returns `null` for an unrated subject**, and the UI must render
+  "No ratings yet" rather than "0.0". A new store has no reputation; that is not
+  the same as a bad one.
+- **The marketplace rating floor and the approval rule share one nested
+  `vendorProfile` filter.** Adding a second `vendorProfile` key would silently drop
+  "approved stores only". There is a test guarding it; do not remove it.
 
 ### Notifications: what a second machine needs to know
 
@@ -322,14 +349,25 @@ the agent once each, and those averages are visible in the marketplace.
   settle those by hand until vendor onboarding is automated.
 - Refunds are full-amount and have no admin UI. `refundPayment` is called
   automatically only when money lands for something already cancelled or returned.
-  Partial refunds and a human-initiated path are Phase 11.
+  Partial refunds and a human-initiated path are Phase 11 — the next phase.
 - Delivery-agent payouts are out of scope for the MVP: the delivery fee settles to
   the platform account, not to the agent who earned it.
 
 
-- Ratings are absent by design until Phase 10, so the marketplace has no
-  "sort by rating" option and no rating filter. Add both with Phase 10 rather than
-  shipping a placeholder.
+- Agent ratings are collected, aggregated and moderated, but **no screen reads
+  them**. `AgentProfile` carries the same three columns as `VendorProfile`, with an
+  index. Surfacing a courier's score to the student about to meet them is a design
+  question (it invites refusing an agent); the admin-facing view belongs with
+  Phase 12's analytics.
+- Individual review comments are not shown publicly — only the average and the
+  count. Listing free text to strangers needs the moderation queue to be watched
+  habitually, which is an operational decision for the pilot.
+- Nobody is nudged to rate. The Phase 9 notification machinery could send a
+  reminder, but a nudge for something optional is close to nagging; decide it with
+  real data on how many students rate unprompted.
+- A rating hides/restores cleanly, but there is no way for a vendor or agent to
+  reply to one. A reply is a second voice in what is currently one buyer's report
+  of one delivery, and it needs its own moderation story.
 - Product images are stored privately and streamed by
   `/api/products/images/[imageId]`, which means no CDN caching for listing photos.
   Revisit in Phase 13 (performance) if browse latency matters.

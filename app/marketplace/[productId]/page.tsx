@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { AddToCartButton } from "@/components/orders/add-to-cart";
+import { RatingBadge } from "@/components/ratings/star-rating";
 import { Card } from "@/components/ui/card";
 import { getActor } from "@/lib/auth/session";
 import { AppError } from "@/lib/errors";
@@ -77,6 +78,15 @@ export default async function ProductDetailPage({
           <Card>
             <p className="font-medium">{product.vendor.storeName}</p>
             <p className="text-sm opacity-70">{product.vendorStorefrontLocation}</p>
+            {/*
+              The store's reputation, shown next to the store rather than the
+              product: a rating is earned by a delivered order (PRD §57).
+            */}
+            <RatingBadge
+              average={product.vendor.ratingAverage}
+              count={product.vendor.ratingCount}
+              className="mt-1"
+            />
             <p className="mt-2 text-sm">
               {product.vendorIsOpenNow ? "Open now" : "Closed right now"}
               {" · "}

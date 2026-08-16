@@ -4,11 +4,14 @@ import { notFound, redirect } from "next/navigation";
 import { HandoverCode } from "@/components/delivery/handover-code";
 import { OrderCancelButton } from "@/components/orders/order-cancel-button";
 import { PayButton } from "@/components/payments/pay-button";
+import { DeliveryRatingPanel } from "@/components/ratings/delivery-rating-panel";
 import { Card } from "@/components/ui/card";
 import { getActor } from "@/lib/auth/session";
 import { listDeliveriesForStudentOrder } from "@/lib/delivery/delivery-service";
 import { formatKobo } from "@/lib/money";
 import { getOrderForStudent } from "@/lib/orders/order-service";
+import { getDeliveryRatingState } from "@/lib/ratings/rating-service";
+
 
 
 /**
@@ -34,6 +37,14 @@ export default async function OrderPage({ params }: { params: Promise<{ orderId:
   // Ownership was already proven by the call above; this one re-checks it anyway,
   // because a service that trusts its caller stops being a security boundary.
   const deliveries = await listDeliveriesForStudentOrder(actor, order.id);
+
+  // The rating state is fetched per delivery rather than per order: a two-store
+  // order is two hand-overs, and a student may have been well served by one and
+  // badly by the other (PRD §57).
+  const ratingStates = await Promise.all(
+    deliveries.map((delivery) => getDeliveryRatingState(actor, delivery.id)),
+  );
+
 
 
   return (
@@ -141,6 +152,36 @@ export default async function OrderPage({ params }: { params: Promise<{ orderId:
                     <PayButton purpose="goods" deliveryId={delivery.id} />
                   </div>
                 ) : null}
+
+                {/*
+                  Rating is offered on the same row as the delivery it is about,
+                  and the panel renders nothing at all until the server says the
+                  delivery completed (PRD §57).
+                */}
+                {(() => {
+                  const state = ratingStates.find((item) => item.deliveryId === delivery.id);
+                  if (!state) return null;
+                  return (
+                    <DeliveryRatingPanel
+                      deliveryId={state.deliveryId}
+                      rateable={state.rateable}
+                      slots={state.slots.map((slot) => ({
+                        subject: slot.subject as "VENDOR" | "DELIVERY_AGENT",
+                        subjectName: slot.subjectName,
+                        available: slot.available,
+                        mine: slot.mine
+                          ? {
+                              id: slot.mine.id,
+                              score: slot.mine.score,
+                              comment: slot.mine.comment,
+                              editable: slot.mine.editable,
+                              hoursLeft: slot.mine.hoursLeft,
+                            }
+                          : null,
+                      }))}
+                    />
+                  );
+                })()}
               </li>
             ))}
           </ul>

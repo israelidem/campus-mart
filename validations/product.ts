@@ -118,7 +118,13 @@ export type InventoryAdjustmentInput = z.infer<typeof inventoryAdjustmentSchema>
 // Marketplace browse (student)
 // ---------------------------------------------------------------------------
 
-export const PRODUCT_SORTS = ["NEWEST", "PRICE_ASC", "PRICE_DESC", "POPULAR"] as const;
+export const PRODUCT_SORTS = [
+  "NEWEST",
+  "PRICE_ASC",
+  "PRICE_DESC",
+  "POPULAR",
+  "TOP_RATED",
+] as const;
 export type ProductSort = (typeof PRODUCT_SORTS)[number];
 
 /** `"true"`/`"false"` from a query string. `z.coerce.boolean()` would treat the
@@ -131,8 +137,10 @@ const queryBoolean = z
 /**
  * Marketplace search, filter, sort and pagination (PRD §24).
  *
- * Sorting by rating is not offered yet: ratings arrive in Phase 10, and a sort
- * that silently ordered by nothing would be worse than its absence.
+ * `TOP_RATED` and `minRating` arrived with Phase 10. They order and filter on the
+ * *store's* aggregate rather than the product's, because a rating is given for a
+ * delivered order — the store and the courier — and the platform does not ask a
+ * student to score an individual item.
  */
 export const marketplaceQuerySchema = z.object({
   /** Free text, matched against product, vendor and category names. */
@@ -144,6 +152,14 @@ export const marketplaceQuerySchema = z.object({
   maxPriceKobo: z.coerce.number().int().min(0).max(100_000_000).optional(),
   /** Hide out-of-stock and paused products. On by default. */
   inStockOnly: queryBoolean,
+  /**
+   * Whole-star floor on the selling store's average, 1–5.
+   *
+   * A floor rather than an exact match: "at least 4 stars" is the question a
+   * buyer actually asks. Stores with no ratings yet are excluded by any floor,
+   * which is a real cost to new vendors — hence it is opt-in and never a default.
+   */
+  minRating: z.coerce.number().int().min(1).max(5).optional(),
   sort: z.enum(PRODUCT_SORTS).default("NEWEST"),
   page: z.coerce.number().int().min(1).max(500).default(1),
   pageSize: z.coerce.number().int().min(1).max(50).default(20),
@@ -170,6 +186,7 @@ export function parseMarketplaceQuery(params: URLSearchParams): MarketplaceQuery
     "minPriceKobo",
     "maxPriceKobo",
     "inStockOnly",
+    "minRating",
     "sort",
     "page",
     "pageSize",

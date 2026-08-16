@@ -2,6 +2,7 @@ import type { Actor } from "@/lib/auth/session";
 import { assertSameCampus, campusScope } from "@/lib/authorization/campus";
 import { prisma } from "@/lib/db/prisma";
 import { NotFoundError } from "@/lib/errors";
+import { formatAverage } from "@/lib/ratings/rating-policy";
 import { isWithinOperatingHours } from "@/lib/vendors/operating-hours";
 import type { MarketplaceQueryInput, ProductSort } from "@/validations/product";
 
@@ -24,7 +25,20 @@ export type MarketplaceProduct = {
   soldCount: number;
   imageId: string | null;
   category: { id: string; name: string; slug: string } | null;
-  vendor: { id: string; storeName: string; slug: string; acceptingOrders: boolean };
+  vendor: {
+    id: string;
+    storeName: string;
+    slug: string;
+    acceptingOrders: boolean;
+    /**
+     * The store's reputation, not the product's (PRD §24, §57).
+     *
+     * `null` when nobody has rated the store yet — deliberately not `0`, so a new
+     * store reads as "no ratings" rather than as the worst store on campus.
+     */
+    ratingAverage: string | null;
+    ratingCount: number;
+  };
 };
 
 export type MarketplacePage = {
@@ -52,16 +66,32 @@ export function buildMarketplaceWhere(
     | "minPriceKobo"
     | "maxPriceKobo"
     | "inStockOnly"
+    | "minRating"
     | "campusId"
   >,
 ): Record<string, unknown> {
+  // The vendor constraint is built up separately so the approval rule and an
+  // optional rating floor end up in one nested filter rather than two, which
+  // Prisma would otherwise resolve as the last one winning.
+  const vendorProfile: Record<string, unknown> = { status: "APPROVED" };
+
+  if (query.minRating !== undefined) {
+    // Compared in stored hundredths, so "at least 4 stars" is >= 400 and a store
+    // averaging 3.99 is correctly excluded.
+    vendorProfile.ratingAverageHundredths = { gte: query.minRating * 100 };
+    // A store with no ratings has an average of 0 and would already fail the
+    // line above; requiring a count as well states the intent rather than
+    // relying on that coincidence.
+    vendorProfile.ratingCount = { gt: 0 };
+  }
+
   const where: Record<string, unknown> = campusScope(
     actor,
     {
       // Retired products never appear, even to their own vendor's customers.
       deletedAt: null,
       // Only stores that are actually approved right now.
-      vendorProfile: { status: "APPROVED" },
+      vendorProfile,
     },
     query.campusId,
   );
@@ -100,8 +130,9 @@ export function buildMarketplaceWhere(
 /**
  * Sort order for a marketplace read.
  *
- * "Popular" uses units sold. Sorting by rating is intentionally not offered:
- * ratings do not exist until Phase 10.
+ * "Popular" uses units sold; "top rated" uses the selling store's stored average
+ * (Phase 10). Every branch ends in `id` so that two rows with identical keys keep
+ * a stable order between pages — without it, page 2 can repeat or skip a product.
  */
 export function buildMarketplaceOrderBy(sort: ProductSort): Record<string, unknown>[] {
   switch (sort) {
@@ -111,6 +142,16 @@ export function buildMarketplaceOrderBy(sort: ProductSort): Record<string, unkno
       return [{ priceKobo: "desc" }, { id: "asc" }];
     case "POPULAR":
       return [{ soldCount: "desc" }, { createdAt: "desc" }, { id: "asc" }];
+    case "TOP_RATED":
+      // The count breaks ties after the average, so a store with one 5-star
+      // rating does not outrank one with forty. Sorting on the stored aggregate
+      // is why it is maintained transactionally: an average computed per request
+      // over every rating row would not survive a busy evening.
+      return [
+        { vendorProfile: { ratingAverageHundredths: "desc" } },
+        { vendorProfile: { ratingCount: "desc" } },
+        { id: "asc" },
+      ];
     case "NEWEST":
     default:
       return [{ createdAt: "desc" }, { id: "asc" }];
@@ -143,7 +184,14 @@ export async function searchProducts(
         soldCount: true,
         category: { select: { id: true, name: true, slug: true } },
         vendorProfile: {
-          select: { id: true, storeName: true, slug: true, acceptingOrders: true },
+          select: {
+            id: true,
+            storeName: true,
+            slug: true,
+            acceptingOrders: true,
+            ratingCount: true,
+            ratingAverageHundredths: true,
+          },
         },
         images: { select: { id: true }, orderBy: { position: "asc" }, take: 1 },
       },
@@ -165,7 +213,19 @@ export async function searchProducts(
       soldCount: row.soldCount,
       imageId: row.images[0]?.id ?? null,
       category: row.category,
-      vendor: row.vendorProfile,
+      vendor: {
+        id: row.vendorProfile.id,
+        storeName: row.vendorProfile.storeName,
+        slug: row.vendorProfile.slug,
+        acceptingOrders: row.vendorProfile.acceptingOrders,
+        // Formatted here, once, so every screen shows the same "4.3" and no
+        // component has to know that the store is 433 hundredths.
+        ratingAverage: formatAverage(
+          row.vendorProfile.ratingAverageHundredths,
+          row.vendorProfile.ratingCount,
+        ),
+        ratingCount: row.vendorProfile.ratingCount,
+      },
     })),
   };
 }
@@ -212,6 +272,8 @@ export async function getMarketplaceProduct(
           slug: true,
           acceptingOrders: true,
           storefrontLocation: true,
+          ratingCount: true,
+          ratingAverageHundredths: true,
           operatingHours: {
             select: { dayOfWeek: true, isClosed: true, opensAt: true, closesAt: true },
           },
@@ -246,6 +308,11 @@ export async function getMarketplaceProduct(
       storeName: product.vendorProfile.storeName,
       slug: product.vendorProfile.slug,
       acceptingOrders: product.vendorProfile.acceptingOrders,
+      ratingAverage: formatAverage(
+        product.vendorProfile.ratingAverageHundredths,
+        product.vendorProfile.ratingCount,
+      ),
+      ratingCount: product.vendorProfile.ratingCount,
     },
     vendorStorefrontLocation: product.vendorProfile.storefrontLocation,
     vendorIsOpenNow:

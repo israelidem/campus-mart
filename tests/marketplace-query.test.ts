@@ -114,6 +114,42 @@ describe("buildMarketplaceWhere", () => {
       { category: { name: { contains: "jollof", mode: "insensitive" } } },
     ]);
   });
+
+  it("keeps the approval rule when a rating floor is added", () => {
+    // Both constraints have to land in the *same* nested vendorProfile filter.
+    // Two separate keys would leave Prisma with only the last one, which would
+    // quietly drop "approved stores only" — the more important of the two.
+    const where = buildMarketplaceWhere(student, { ...baseQuery, minRating: 4 });
+
+    expect(where.vendorProfile).toEqual({
+      status: "APPROVED",
+      ratingAverageHundredths: { gte: 400 },
+      ratingCount: { gt: 0 },
+    });
+  });
+
+  it("compares the floor in stored hundredths", () => {
+    // "3 stars and up" is >= 300, so a store averaging 2.99 is excluded.
+    const where = buildMarketplaceWhere(student, { ...baseQuery, minRating: 3 });
+
+    expect(where.vendorProfile).toMatchObject({ ratingAverageHundredths: { gte: 300 } });
+  });
+
+  it("excludes unrated stores from any rating floor, explicitly", () => {
+    // An unrated store's average is 0 and would fail the floor anyway; requiring
+    // a count states the intent instead of relying on that coincidence.
+    const where = buildMarketplaceWhere(student, { ...baseQuery, minRating: 1 });
+
+    expect(where.vendorProfile).toMatchObject({ ratingCount: { gt: 0 } });
+  });
+
+  it("does not constrain ratings at all when no floor is asked for", () => {
+    // A new store with no ratings must still be findable by default, or the
+    // marketplace would be closed to every vendor who has not sold yet.
+    const where = buildMarketplaceWhere(student, baseQuery);
+
+    expect(where.vendorProfile).toEqual({ status: "APPROVED" });
+  });
 });
 
 describe("buildMarketplaceOrderBy", () => {
@@ -124,8 +160,16 @@ describe("buildMarketplaceOrderBy", () => {
     expect(buildMarketplaceOrderBy("NEWEST")[0]).toEqual({ createdAt: "desc" });
   });
 
+  it("sorts by the selling store's average, then by how many rated it", () => {
+    // The count is the tie-breaker so one 5-star rating does not outrank forty.
+    expect(buildMarketplaceOrderBy("TOP_RATED").slice(0, 2)).toEqual([
+      { vendorProfile: { ratingAverageHundredths: "desc" } },
+      { vendorProfile: { ratingCount: "desc" } },
+    ]);
+  });
+
   it("always breaks ties on id so pages cannot repeat a row", () => {
-    for (const sort of ["PRICE_ASC", "PRICE_DESC", "POPULAR", "NEWEST"] as const) {
+    for (const sort of ["PRICE_ASC", "PRICE_DESC", "POPULAR", "TOP_RATED", "NEWEST"] as const) {
       const order = buildMarketplaceOrderBy(sort);
       expect(order[order.length - 1]).toEqual({ id: "asc" });
     }
@@ -156,5 +200,24 @@ describe("parseMarketplaceQuery", () => {
 
   it("caps the page size so one request cannot drain the catalogue", () => {
     expect(() => parseMarketplaceQuery(new URLSearchParams("pageSize=500"))).toThrow();
+  });
+
+  it("reads a rating floor from the query string", () => {
+    expect(parseMarketplaceQuery(new URLSearchParams("minRating=4")).minRating).toBe(4);
+  });
+
+  it("applies no rating floor unless one is asked for", () => {
+    expect(parseMarketplaceQuery(new URLSearchParams()).minRating).toBeUndefined();
+  });
+
+  it("rejects a rating floor outside the five stars", () => {
+    // Six stars do not exist, and a half star cannot be a whole-star floor.
+    expect(() => parseMarketplaceQuery(new URLSearchParams("minRating=6"))).toThrow();
+    expect(() => parseMarketplaceQuery(new URLSearchParams("minRating=0"))).toThrow();
+    expect(() => parseMarketplaceQuery(new URLSearchParams("minRating=4.5"))).toThrow();
+  });
+
+  it("accepts the top-rated sort", () => {
+    expect(parseMarketplaceQuery(new URLSearchParams("sort=TOP_RATED")).sort).toBe("TOP_RATED");
   });
 });

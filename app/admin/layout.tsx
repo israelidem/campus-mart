@@ -18,6 +18,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           <Link className="underline" href="/admin/delivery-locations">
             Delivery locations
           </Link>
+          <Link className="underline" href="/admin/ratings">
+            Reviews
+          </Link>
           <Link className="underline" href="/admin/settings">
 
 
