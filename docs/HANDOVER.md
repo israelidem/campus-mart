@@ -1,6 +1,7 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-16 (end of Phase 10). Written so work can continue on a
+Last updated: 2026-08-16 (Phase 10 done; Phase 11 part-built). Written so work can continue on a
+
 
 
 
@@ -34,11 +35,13 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | Done |
 | 9 | Notifications & PWA: notification catalogue, in-app inbox, web push, manifest, service worker, offline page, installability | Done |
 | 10 | Ratings: per-delivery vendor + agent ratings, 24-hour edit window, admin moderation, stored aggregates, marketplace "top rated" sort and rating filter | Done |
-| 11 | Disputes & refunds | **Next** |
+| 11 | Disputes & refunds | **In progress** — schema, migrations, policy engine and tests landed; service/API/UI outstanding |
+
 | 12 | Admin analytics | Not started |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 207 tests / 15 files passing.
+Verification at handover: `npm run test` → 244 tests / 16 files passing.
+
 
 
 `npm run lint` → clean. `npm run build` → compiles and typechecks with no errors
@@ -236,26 +239,72 @@ delivery state machine records why a delivery ended badly, and Phase 10 drew the
 line that makes disputes necessary — a cancelled or returned delivery **cannot** be
 rated, precisely because a complaint is not a score.
 
-1. **Schema**: a dispute belongs to a `VendorOrder` (what was bought) and may name
-   a `Delivery` (how it went wrong). It needs a status the admin drives, a reason
-   the student picks from a closed list, free text, and evidence uploads through
-   the existing private storage.
-2. **The rule worth guarding is the window**: how long after a delivery may a
-   student still dispute it, and what happens to a dispute filed on an order whose
-   money has already settled to the vendor. Put it in a pure policy module the way
-   `rating-policy.ts` is, so the deadline is testable without a database.
-3. **Refunds**: `refundPayment` is full-amount only today. Partial refunds are the
-   real work here — the split between platform commission and vendor share has to
-   be decided before money moves, not after, and `lib/payments/settlement.ts`
-   already owns that arithmetic.
-4. **Notifications**: adding a dispute type is a new `NotificationType` plus one
-   renderer; the exhaustive `Record` will refuse to compile without the copy.
-5. Tests: the window open and shut, a dispute by a stranger, a partial refund that
-   must not exceed what was actually paid, and idempotency on a retried refund.
+**Done so far (committed, verified, pushed):**
+
+1. **Schema + two migrations, both applied.** `Dispute` belongs to a `VendorOrder`
+   and optionally names a `Delivery`; `Refund` is its own table so a payment can be
+   refunded more than once. `Payment` gained `refundedAmountKobo` as a running
+   total. The second migration
+   (`20260816021500_phase_11_dispute_guards`) adds what Prisma cannot express:
+   - a partial unique index so one vendor order can have only **one live** dispute
+     (`OPEN`/`UNDER_REVIEW`) while allowing any number of closed ones;
+   - `CHECK (refunded_amount_kobo <= amount_kobo)` on `Payment` — the database
+     itself refuses to over-refund, regardless of application bugs;
+   - `CHECK (from_platform_kobo + from_vendor_kobo = amount_kobo)` on `Refund`, so
+     an attribution can never lose or invent a kobo.
+2. **`lib/disputes/dispute-policy.ts` — pure, 37 tests.** The 7-day window measured
+   from delivery completion; the status machine as a table (`RESOLVED` and
+   `WITHDRAWN` are terminal); `resolveRefundAmount` (full/partial/none, refusing a
+   "partial" that is really a full or a zero); `attributeRefund` (proportional
+   unwind of commission vs vendor payout, remainder to the platform); and
+   `refundCapacity` (the never-refund-more-than-captured rule in prose).
+3. **`validations/dispute.ts`** — file/resolve/withdraw/list/queue schemas.
+
+**Still to do, in this order:**
+
+4. **`lib/disputes/dispute-service.ts`.** File (verify the student owns the vendor
+   order, the delivery completed, the window is open, no live dispute exists —
+   snapshot `goodsSubtotalKobo`, `commissionKobo`, `vendorPayoutKobo` onto the row
+   at filing time so a later commission change cannot rewrite history); withdraw;
+   mark under review; resolve. Resolution is the interesting one: compute inside a
+   transaction, write the `Refund` row and bump `Payment.refundedAmountKobo`, and
+   only then call Paystack. `refundPayment` in `lib/payments/payment-service.ts` is
+   full-amount only — it needs an amount parameter, and `refundTransaction`
+   already accepts one.
+5. **Notifications.** `DISPUTE_FILED` (to campus admins), `DISPUTE_RESOLVED` (to
+   the student, and to the vendor when their payout is reduced). New
+   `NotificationType` enum values + renderers in `lib/notifications/messages.ts`;
+   the exhaustive `Record` will refuse to compile without the copy.
+6. **Audit actions**: `DISPUTE_FILED`, `DISPUTE_WITHDRAWN`, `DISPUTE_REVIEWED`,
+   `DISPUTE_RESOLVED`, `REFUND_ISSUED` in `lib/audit/audit-log.ts`.
+7. **API**: `POST /api/orders/[vendorOrderId]/disputes`, `GET /api/disputes`,
+   `POST /api/disputes/[disputeId]/withdraw`, `GET /api/admin/disputes`,
+   `POST /api/admin/disputes/[disputeId]/review`,
+   `POST /api/admin/disputes/[disputeId]/resolve`.
+8. **UI**: a dispute panel on `/orders/[orderId]` (mirroring
+   `components/ratings/delivery-rating-panel.tsx`) and `/admin/disputes`
+   (mirroring `components/admin/rating-moderation-list.tsx`).
 
 Acceptance (PRD Phase 11): a student can raise a dispute on a delivered or failed
 order, an admin can resolve it, and a resolution that owes money issues a real
 Paystack refund exactly once.
+
+### Disputes: what a second machine needs to know
+
+- **`lib/disputes/dispute-policy.ts` is pure and owns every money decision.** The
+  clock is always a parameter. Do not compute a refund amount or an attribution
+  anywhere else.
+- **The snapshot on the `Dispute` row is the ceiling, not the live order.** A
+  refund must be computed against what was charged at the time, or a commission
+  change would retroactively alter old refunds.
+- **A refund is an unwind, not a penalty.** Platform and vendor each give back
+  their own proportional share (`attributeRefund`). Rounding falls on the platform.
+- **Write the `Refund` row before calling Paystack**, so a provider timeout leaves
+  a record to reconcile rather than silent money movement. The `CHECK` constraints
+  are the backstop if that ordering is ever got wrong.
+- **One live dispute per vendor order**, enforced by a partial unique index. Catch
+  the unique violation and answer with a readable conflict, not a 500.
+
 
 ### Ratings: what a second machine needs to know
 
@@ -347,9 +396,12 @@ Paystack refund exactly once.
   vendor without one still sells; the platform receives the whole amount, the
   payment records `vendorRouted: false`, and a warning is logged. Someone has to
   settle those by hand until vendor onboarding is automated.
-- Refunds are full-amount and have no admin UI. `refundPayment` is called
-  automatically only when money lands for something already cancelled or returned.
-  Partial refunds and a human-initiated path are Phase 11 — the next phase.
+- Refunds are still full-amount in *execution* and have no admin UI.
+  `refundPayment` is called automatically only when money lands for something
+  already cancelled or returned. The partial-refund arithmetic now exists and is
+  tested (`lib/disputes/dispute-policy.ts`), and the database will refuse an
+  over-refund, but **nothing calls it yet** — that is step 4 of section 5.
+
 - Delivery-agent payouts are out of scope for the MVP: the delivery fee settles to
   the platform account, not to the agent who earned it.
 
