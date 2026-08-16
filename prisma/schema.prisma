@@ -167,7 +167,6 @@ enum DeliveryEventType {
   CANCELLED
 }
 
-
 // ---------------------------------------------------------------------------
 // Campus (multi-campus from the first migration — PRD Part D)
 // ---------------------------------------------------------------------------
@@ -211,11 +210,11 @@ model Campus {
   notifications     Notification[]
   pushSubscriptions PushSubscription[]
   ratings           Rating[]
+  disputes          Dispute[]
+  refunds           Refund[]
 
   @@index([status])
-
 }
-
 
 /// Per-campus operational configuration (PRD §18, §29, §35, §47).
 ///
@@ -307,11 +306,12 @@ model User {
   pushSubscriptions PushSubscription[]     @relation("PushSubscriptionUser")
   ratingsGiven      Rating[]               @relation("RatingRater")
   ratingsModerated  Rating[]               @relation("RatingModerator")
+  disputesRaised    Dispute[]              @relation("DisputeRaiser")
+  disputesResolved  Dispute[]              @relation("DisputeResolver")
 
   @@index([campusId, role])
   @@index([role])
 }
-
 
 model Session {
   id        String   @id @default(cuid())
@@ -552,7 +552,7 @@ model VendorProfile {
   paystackSubaccountCode String?
 
   /// Reason shown to the vendor for a rejection, correction or suspension.
-  reviewNote   String?
+  reviewNote String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -920,6 +920,7 @@ model Order {
 
   vendorOrders VendorOrder[]
   payments     Payment[]
+  disputes     Dispute[]
 
   @@index([campusId, status])
   @@index([studentId, placedAt])
@@ -962,6 +963,7 @@ model VendorOrder {
 
   items    OrderItem[]
   delivery Delivery?
+  disputes Dispute[]
 
   /// A vendor appears at most once per invoice; a second item from the same
   /// store joins the existing slice.
@@ -1131,22 +1133,22 @@ model Delivery {
   // Hand-over code (PRD §45–46, Phase 7) ---------------------------------
   /// HMAC of the current code, never the code itself: the plaintext is shown to
   /// the student once, at the moment it is issued, and is not recoverable.
-  otpHash        String?
-  otpIssuedAt    DateTime?
+  otpHash       String?
+  otpIssuedAt   DateTime?
   /// otpIssuedAt + OTP_VALIDITY_MINUTES (platform policy, see lib/delivery/otp).
-  otpExpiresAt   DateTime?
+  otpExpiresAt  DateTime?
   /// Wrong tries against the current code. Reset when a new code is issued.
-  otpAttempts    Int       @default(0)
+  otpAttempts   Int       @default(0)
   /// How many codes this delivery has needed, kept for support and abuse review.
-  otpIssueCount  Int       @default(0)
-  otpVerifiedAt  DateTime?
+  otpIssueCount Int       @default(0)
+  otpVerifiedAt DateTime?
 
   // Goods payment (PRD §46, Phase 7 sets the window, Phase 8 settles it) --
   /// otpVerifiedAt + campus goodsPaymentWindowMinutes. The server compares it;
   /// letting it pass unpaid returns the goods to the vendor.
   goodsPaymentDeadline DateTime?
 
-  completedAt    DateTime?
+  completedAt DateTime?
 
   returnedAt     DateTime?
   cancelledAt    DateTime?
@@ -1164,6 +1166,7 @@ model Delivery {
   events   DeliveryEvent[]
   payments Payment[]
   ratings  Rating[]
+  disputes Dispute[]
 
   /// The pool query: available jobs on a campus, optionally narrowed to the
 
@@ -1176,7 +1179,6 @@ model Delivery {
   @@index([status, waitDeadline])
   /// The goods-payment timeout sweep (Phase 7).
   @@index([status, goodsPaymentDeadline])
-
 }
 
 /// One immutable entry in a delivery's history (PRD §42).
@@ -1228,7 +1230,14 @@ enum PaymentStatus {
   FAILED
   /// Initialised, never completed, and superseded by a newer attempt.
   ABANDONED
-  /// Money arrived and was sent back — the goods had already gone home.
+  /// Some of the money went back, and some of it is still ours to settle.
+  ///
+  /// Distinct from REFUNDED because "was this paid for?" and "was this fully
+  /// unwound?" are different questions: a partially refunded goods payment still
+  /// paid for a delivery that really happened.
+  PARTIALLY_REFUNDED
+  /// The whole amount went back — the goods had already gone home, or a dispute
+  /// was upheld in full.
   REFUNDED
 }
 
@@ -1264,14 +1273,14 @@ model Payment {
   reference String @unique
 
   /// What the student was asked to pay, in kobo.
-  amountKobo Int
+  amountKobo           Int
   /// The part that stays with the platform after the split.
-  platformKobo Int
+  platformKobo         Int
   /// The vendor's share of a goods payment, 0 for a delivery fee.
-  vendorPayoutKobo Int @default(0)
+  vendorPayoutKobo     Int     @default(0)
   /// True when Paystack routed the vendor's share to their subaccount. False
   /// means the platform is holding it and owes a transfer.
-  vendorRouted     Boolean @default(false)
+  vendorRouted         Boolean @default(false)
   /// Subaccount the split was addressed to, kept for reconciliation.
   vendorSubaccountCode String?
 
@@ -1287,14 +1296,22 @@ model Payment {
   /// Provider's own words when a payment fails, shown to support, not to users.
   failureReason String?
 
+  /// When the *most recent* refund against this payment succeeded.
   refundedAt         DateTime?
+  /// **Cumulative** kobo sent back, across every refund against this payment.
+  ///
+  /// Cumulative rather than per-refund because the invariant that matters is
+  /// "we can never send back more than arrived", and that is a statement about
+  /// the total. The individual refunds are rows in `refunds`.
   refundedAmountKobo Int?
+  /// The reason for the most recent refund. The full history is in `refunds`.
   refundReason       String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  events PaymentEvent[]
+  events  PaymentEvent[]
+  refunds Refund[]
 
   @@index([orderId, purpose, status])
   @@index([deliveryId, status])
@@ -1369,6 +1386,14 @@ enum NotificationType {
   DELIVERY_CANCELLED
   /// Applicant: an admin decided on your student, vendor or agent application.
   APPLICATION_REVIEWED
+  /// Vendor + admins: a student opened a case against a purchase.
+  DISPUTE_RAISED
+  /// Student: an admin picked the case up, so somebody is on it.
+  DISPUTE_UPDATED
+  /// Student + vendor: the case was closed, with or without money moving.
+  DISPUTE_RESOLVED
+  /// Student: money is on its way back.
+  REFUND_ISSUED
 }
 
 /// One in-app notification for one user (PRD §51, §53).
@@ -1453,9 +1478,9 @@ model PushSubscription {
   userAgent String?
 
   /// Last time a push was accepted by the service for this device.
-  lastUsedAt DateTime?
+  lastUsedAt   DateTime?
   /// Consecutive send failures that were not fatal. A fatal one deletes the row.
-  failureCount Int @default(0)
+  failureCount Int       @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1551,4 +1576,195 @@ model Rating {
   @@index([raterId, createdAt])
 }
 
+// ---------------------------------------------------------------------------
+// Disputes and refunds (PRD Â§60â€“63, Phase 11)
+// ---------------------------------------------------------------------------
 
+/// Why a student is complaining, from a closed list (PRD Â§60).
+///
+/// A closed list rather than free text alone, because the reason is what a
+/// campus will later count: "how often do packages arrive short" is answerable
+/// from an enum and unanswerable from a paragraph. `OTHER` exists so an honest
+/// complaint that fits nowhere is not forced into the wrong box, and its share of
+/// the numbers is the signal that the list needs another entry.
+enum DisputeReason {
+  /// Marked delivered, but nothing arrived.
+  ITEM_NOT_RECEIVED
+  /// Something arrived, but not what was bought.
+  WRONG_ITEM
+  /// Fewer units, or a missing line from the order.
+  ITEM_INCOMPLETE
+  /// Arrived broken, spoiled or spilled.
+  ITEM_DAMAGED
+  /// Genuinely the item bought, but not as the listing described it.
+  NOT_AS_DESCRIBED
+  /// The amount charged does not match the order.
+  OVERCHARGED
+  /// About the courier's conduct rather than the goods.
+  AGENT_CONDUCT
+  OTHER
+}
+
+/// Where a case is in its life (PRD Â§61).
+///
+/// There is deliberately no `REJECTED`: a declined complaint is still a
+/// *resolved* one â€” it was read, decided and explained. Splitting it out would
+/// make "how many cases did we close" depend on who won, which is precisely the
+/// number an admin should not be able to flatter.
+enum DisputeStatus {
+  /// Filed, nobody has picked it up yet.
+  OPEN
+  /// An admin has taken it and is investigating.
+  UNDER_REVIEW
+  /// Closed with an outcome. Terminal.
+  RESOLVED
+  /// The student took it back. Terminal for this case; they may file again while
+  /// the window is open, because a withdrawal is often a misunderstanding.
+  WITHDRAWN
+}
+
+/// What an admin decided (PRD Â§62).
+///
+/// `NO_REFUND` is an outcome, not the absence of one: a case closed without money
+/// moving still owes the student a reason.
+enum DisputeResolution {
+  /// Everything the student paid for these goods goes back.
+  FULL_REFUND
+  /// Part of it goes back â€” a short delivery, one damaged item out of four.
+  PARTIAL_REFUND
+  /// The complaint was not upheld, or was settled without money.
+  NO_REFUND
+}
+
+/// One student's case against one purchase (PRD Â§60â€“63).
+///
+/// A dispute hangs off a **`VendorOrder`**, not an `Order`: an invoice can span
+/// two stores, and a case against one store is not a case against the other. The
+/// `Delivery` is optional because a purchase can go wrong before a delivery
+/// exists, and because "what was bought" and "how it travelled" are different
+/// subjects.
+///
+/// The amounts are snapshotted at filing, exactly as Phase 5 snapshots prices:
+/// what is at stake in a case must not change because a campus later edited its
+/// commission or a vendor edited a product.
+model Dispute {
+  id String @id @default(cuid())
+
+  /// Human reference, e.g. "DS-7Q4F2K". Quoted in messages and to support, so it
+  /// has to be pronounceable â€” a cuid is not.
+  reference String @unique
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  /// The purchase being disputed. One *live* case per purchase, enforced by a
+  /// partial unique index created in the migration: two open cases about the
+  /// same purchase would let two admins refund it twice.
+  vendorOrderId String
+  vendorOrder   VendorOrder @relation(fields: [vendorOrderId], references: [id], onDelete: Restrict)
+
+  /// The delivery, when there was one. SetNull rather than Restrict: a case
+  /// outlives the delivery record it describes.
+  deliveryId String?
+  delivery   Delivery? @relation(fields: [deliveryId], references: [id], onDelete: SetNull)
+
+  raisedById String
+  raisedBy   User   @relation("DisputeRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+
+  status      DisputeStatus @default(OPEN)
+  reason      DisputeReason
+  /// The student's account, in their own words.
+  description String
+
+  /// What the goods cost, snapshotted at filing. The ceiling on any refund.
+  goodsSubtotalKobo Int
+  /// The platform's cut of those goods, snapshotted. Used to attribute a refund.
+  commissionKobo    Int
+  /// The vendor's share of those goods, snapshotted.
+  vendorPayoutKobo  Int
+
+  resolution       DisputeResolution?
+  /// The admin's explanation. Required when resolving: an unexplained decision is
+  /// indistinguishable from an arbitrary one.
+  resolutionNote   String?
+  /// What was actually sent back, in kobo. 0 for NO_REFUND.
+  refundAmountKobo Int?
+  resolvedAt       DateTime?
+  resolvedById     String?
+  resolvedBy       User?              @relation("DisputeResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  withdrawnAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  refunds Refund[]
+
+  /// The admin queue for a campus, oldest-first within a status.
+  @@index([campusId, status, createdAt])
+  @@index([raisedById, createdAt])
+  @@index([vendorOrderId, status])
+  @@index([status, createdAt])
+}
+
+/// One attempt to send money back (PRD Â§63).
+///
+/// A row per refund rather than three more columns on `Payment`, because a
+/// payment can be refunded more than once â€” a case resolved with a partial
+/// refund, then escalated â€” and because a refund that fails needs somewhere to
+/// say so without erasing the one that succeeded.
+///
+/// `idempotencyKey` is the safety rail. A dispute resolution keys its refund on
+/// the dispute, so a double-clicked "Resolve" hits a unique-constraint violation
+/// instead of sending the student's money twice. This is the same trick
+/// `Payment.reference` plays for money coming in, for the same reason.
+model Refund {
+  id String @id @default(cuid())
+
+  campusId String
+  campus   Campus @relation(fields: [campusId], references: [id], onDelete: Restrict)
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  /// The case that caused it, when a human decided it rather than the system.
+  disputeId String?
+  dispute   Dispute? @relation(fields: [disputeId], references: [id], onDelete: SetNull)
+
+  /// Total sent back, in kobo. Never more than the payment captured, less
+  /// whatever earlier refunds already returned.
+  amountKobo       Int
+  /// Attribution of that total (PRD Â§35). The two always sum to `amountKobo`:
+  /// money taken out of the vendor's share is money the platform no longer holds
+  /// for them, and the distinction is what makes a payout reconcilable.
+  fromPlatformKobo Int
+  fromVendorKobo   Int
+
+  reason String
+
+  /// Ours, unique platform-wide. See the note above.
+  idempotencyKey String @unique
+
+  /// Paystack's id for the refund, kept for reconciliation.
+  providerRefundId String?
+
+  /// Set when the provider confirmed it. Null with no `failureReason` means
+  /// in-flight: we asked, and do not yet know.
+  succeededAt   DateTime?
+  failureReason String?
+
+  /// Who decided. Null when the system decided â€” money arriving for goods that
+  /// had already gone home.
+  initiatedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([paymentId, createdAt])
+  @@index([campusId, createdAt])
+  @@index([disputeId])
+  @@index([succeededAt, createdAt])
+}
