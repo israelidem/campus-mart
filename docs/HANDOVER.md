@@ -1,18 +1,12 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-16 (Phase 10 done; Phase 11 part-built). Written so work can continue on a
-
-
-
-
+Last updated: 2026-08-16 (Phases 0–11 done). Written so work can continue on a
 second machine (or by another developer/agent) without re-reading the whole
 codebase.
 
-
 Source of truth for scope: `docs/PRD.docx`. Build order and
-
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-10-report.md`.
+`docs/phase-0-report.md` … `docs/phase-11-report.md`.
 
 
 
@@ -35,26 +29,24 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 8 | Paystack: delivery-fee payment, goods payment, splits, commission, webhooks, idempotency, refunds | Done |
 | 9 | Notifications & PWA: notification catalogue, in-app inbox, web push, manifest, service worker, offline page, installability | Done |
 | 10 | Ratings: per-delivery vendor + agent ratings, 24-hour edit window, admin moderation, stored aggregates, marketplace "top rated" sort and rating filter | Done |
-| 11 | Disputes & refunds | **In progress** — schema, migrations, policy engine and tests landed; service/API/UI outstanding |
-
-| 12 | Admin analytics | Not started |
+| 11 | Disputes & refunds: 7-day window, one live case per vendor order, partial refunds, payout-first attribution, admin queue | Done |
+| 12 | Admin analytics | **Next** |
 | 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
 
 Verification at handover: `npm run test` → 244 tests / 16 files passing.
-
-
-
 `npm run lint` → clean. `npm run build` → compiles and typechecks with no errors
 (a full Turbopack production build takes several minutes on a laptop; be patient
 rather than assuming it hung).
 
-
 All migrations are applied to the Neon database (`npx prisma migrate status`
-
-
 clean, `prisma migrate diff --from-config-datasource --to-schema` reports no
 difference), so a second machine pointed at the same database only needs
 `npm install` and `npx prisma generate`.
+
+**Run `npx prisma generate` before you trust a typecheck.** A stale generated
+client typechecks against last week's schema. That is not hypothetical: it hid
+four notification types with no renderer through the whole of Phase 10, and they
+would have shipped as blank messages. See `docs/phase-11-report.md`.
 
 
 
@@ -228,82 +220,79 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 11 should do next
+## 5. What Phase 12 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-Phase 11 is disputes and refunds (PRD §60–63). Everything it needs already exists
-in a usable state: `refundPayment` performs a Paystack refund idempotently, the
-delivery state machine records why a delivery ended badly, and Phase 10 drew the
-line that makes disputes necessary — a cancelled or returned delivery **cannot** be
-rated, precisely because a complaint is not a score.
+Phase 12 is admin analytics (PRD §65–68). Unlike every phase before it, this one
+should add **almost no schema**: the numbers already exist as rows. Orders carry
+frozen totals, payments carry what was captured, `Refund` carries what went back,
+`DeliveryEvent` carries every state change with a timestamp, and both
+`VendorProfile` and `AgentProfile` carry rating aggregates. The work is reading
+them honestly, per campus, without a single `SELECT *` over a year of orders.
 
-**Done so far (committed, verified, pushed):**
+Expected shape:
 
-1. **Schema + two migrations, both applied.** `Dispute` belongs to a `VendorOrder`
-   and optionally names a `Delivery`; `Refund` is its own table so a payment can be
-   refunded more than once. `Payment` gained `refundedAmountKobo` as a running
-   total. The second migration
-   (`20260816021500_phase_11_dispute_guards`) adds what Prisma cannot express:
-   - a partial unique index so one vendor order can have only **one live** dispute
-     (`OPEN`/`UNDER_REVIEW`) while allowing any number of closed ones;
-   - `CHECK (refunded_amount_kobo <= amount_kobo)` on `Payment` — the database
-     itself refuses to over-refund, regardless of application bugs;
-   - `CHECK (from_platform_kobo + from_vendor_kobo = amount_kobo)` on `Refund`, so
-     an attribution can never lose or invent a kobo.
-2. **`lib/disputes/dispute-policy.ts` — pure, 37 tests.** The 7-day window measured
-   from delivery completion; the status machine as a table (`RESOLVED` and
-   `WITHDRAWN` are terminal); `resolveRefundAmount` (full/partial/none, refusing a
-   "partial" that is really a full or a zero); `attributeRefund` (proportional
-   unwind of commission vs vendor payout, remainder to the platform); and
-   `refundCapacity` (the never-refund-more-than-captured rule in prose).
-3. **`validations/dispute.ts`** — file/resolve/withdraw/list/queue schemas.
+1. **`lib/analytics/analytics-service.ts`** — one function per question a Campus
+   Admin actually asks: gross merchandise value, commission earned, refunds paid,
+   orders by status, delivery success rate, median time from payment to hand-over,
+   top stores, agent throughput. Every one takes `(actor, { from, to })` and every
+   one filters on `actor.campusId` in the query (Rule 25/29). A Super Admin may
+   pass an explicit `campusId`, or omit it for a platform-wide roll-up.
+2. **Aggregate in Postgres, not in Node.** Use `groupBy` and `aggregate`. If a
+   figure cannot be expressed that way, it probably needs a raw query with an
+   explicit index, not a loop over rows.
+3. **`validations/analytics.ts`** — the date range. Default to the last 30 days,
+   cap the span, and reject `from > to` rather than silently swapping them.
+4. **`GET /api/admin/analytics`** and **`GET /api/super-admin/analytics`**.
+5. **`/admin/analytics`** — a server component. This is the natural home for the
+   agent-rating view that Phase 10 deliberately did not build a student-facing
+   screen for.
+6. **Tests**: the pure parts. Bucketing a date range, computing a rate with a zero
+   denominator (a campus with no deliveries has *no* success rate, not 0%), and
+   formatting a duration. Do not test Prisma's `groupBy`.
 
-**Still to do, in this order:**
+Two traps worth naming in advance:
 
-4. **`lib/disputes/dispute-service.ts`.** File (verify the student owns the vendor
-   order, the delivery completed, the window is open, no live dispute exists —
-   snapshot `goodsSubtotalKobo`, `commissionKobo`, `vendorPayoutKobo` onto the row
-   at filing time so a later commission change cannot rewrite history); withdraw;
-   mark under review; resolve. Resolution is the interesting one: compute inside a
-   transaction, write the `Refund` row and bump `Payment.refundedAmountKobo`, and
-   only then call Paystack. `refundPayment` in `lib/payments/payment-service.ts` is
-   full-amount only — it needs an amount parameter, and `refundTransaction`
-   already accepts one.
-5. **Notifications.** `DISPUTE_FILED` (to campus admins), `DISPUTE_RESOLVED` (to
-   the student, and to the vendor when their payout is reduced). New
-   `NotificationType` enum values + renderers in `lib/notifications/messages.ts`;
-   the exhaustive `Record` will refuse to compile without the copy.
-6. **Audit actions**: `DISPUTE_FILED`, `DISPUTE_WITHDRAWN`, `DISPUTE_REVIEWED`,
-   `DISPUTE_RESOLVED`, `REFUND_ISSUED` in `lib/audit/audit-log.ts`.
-7. **API**: `POST /api/orders/[vendorOrderId]/disputes`, `GET /api/disputes`,
-   `POST /api/disputes/[disputeId]/withdraw`, `GET /api/admin/disputes`,
-   `POST /api/admin/disputes/[disputeId]/review`,
-   `POST /api/admin/disputes/[disputeId]/resolve`.
-8. **UI**: a dispute panel on `/orders/[orderId]` (mirroring
-   `components/ratings/delivery-rating-panel.tsx`) and `/admin/disputes`
-   (mirroring `components/admin/rating-moderation-list.tsx`).
+- **Money must stay integer kobo through every aggregate.** `_sum` returns
+  `number | null`; the `null` means "no rows", and rendering it as ₦0.00 tells a
+  Campus Admin their vendors sold nothing when in fact nobody asked the question
+  properly.
+- **`soldCount` counts placed orders, not delivered ones** (see section 6). Any
+  "top stores" panel built on it will flatter a store whose orders get cancelled.
+  Count from `VendorOrder` with a status filter instead.
 
-Acceptance (PRD Phase 11): a student can raise a dispute on a delivered or failed
-order, an admin can resolve it, and a resolution that owes money issues a real
-Paystack refund exactly once.
+Acceptance (PRD Phase 12): a Campus Admin sees revenue, commission, order volume,
+delivery performance and vendor/agent standings for their own campus and no other,
+over a range they choose.
 
 ### Disputes: what a second machine needs to know
 
 - **`lib/disputes/dispute-policy.ts` is pure and owns every money decision.** The
   clock is always a parameter. Do not compute a refund amount or an attribution
   anywhere else.
-- **The snapshot on the `Dispute` row is the ceiling, not the live order.** A
-  refund must be computed against what was charged at the time, or a commission
-  change would retroactively alter old refunds.
-- **A refund is an unwind, not a penalty.** Platform and vendor each give back
-  their own proportional share (`attributeRefund`). Rounding falls on the platform.
+- **A dispute hangs off a `VendorOrder`, never an `Order`.** An invoice can span two
+  stores; a complaint is against one of them.
+- **The snapshot on the `Dispute` row is the ceiling, not the live order.** The
+  goods subtotal, commission and payout are copied onto the row when the case is
+  filed, so a later commission change cannot retroactively alter an old refund.
+- **A refund comes out of the payout first, and the commission only after.**
+  `attributeRefund` gives the vendor's payout to the refund up to its own size and
+  charges the platform only the excess. Splitting proportionally would have the
+  platform funding a refund for goods it never touched.
+- **A partial refund is capped at the goods subtotal, not the order total.** The
+  delivery fee belongs to the agent who earned it.
 - **Write the `Refund` row before calling Paystack**, so a provider timeout leaves
   a record to reconcile rather than silent money movement. The `CHECK` constraints
   are the backstop if that ordering is ever got wrong.
-- **One live dispute per vendor order**, enforced by a partial unique index. Catch
-  the unique violation and answer with a readable conflict, not a 500.
+- **One live dispute per vendor order**, enforced by a partial unique index. The
+  service checks first for a readable error; the index is what makes the check
+  true. A *resolved* case does not block a new one.
+- **Resolution answers 200 even when the provider refuses the refund**, carrying
+  `refund.succeeded` and `refund.failureReason`. The decision happened and is
+  recorded; what failed is the money movement, and the admin needs to be told that
+  precisely rather than shown a generic error.
 
 
 ### Ratings: what a second machine needs to know
@@ -396,11 +385,16 @@ Paystack refund exactly once.
   vendor without one still sells; the platform receives the whole amount, the
   payment records `vendorRouted: false`, and a warning is logged. Someone has to
   settle those by hand until vendor onboarding is automated.
-- Refunds are still full-amount in *execution* and have no admin UI.
-  `refundPayment` is called automatically only when money lands for something
-  already cancelled or returned. The partial-refund arithmetic now exists and is
-  tested (`lib/disputes/dispute-policy.ts`), and the database will refuse an
-  over-refund, but **nothing calls it yet** — that is step 4 of section 5.
+- **A refund that Paystack refuses is recorded but not retried.** The `Refund` row
+  exists with its failure reason, the dispute is resolved, and the admin is told —
+  but nothing sweeps failed refunds and tries again. Until something does, an admin
+  who sees "the refund needs retrying" has to resolve it through the Paystack
+  dashboard and reconcile by hand. A retry pass belongs with `/api/cron/sweep`.
+- **The vendor's side of a dispute is read-only.** A vendor is notified when a case
+  reduces their payout and can read the resolution, but cannot respond before it is
+  decided. That is a deliberate MVP cut, not an oversight: a two-sided case needs a
+  reply window, which needs its own deadline, which needs its own sweep. Revisit
+  once the pilot shows how often admins actually want the store's account.
 
 - Delivery-agent payouts are out of scope for the MVP: the delivery fee settles to
   the platform account, not to the agent who earned it.

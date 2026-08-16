@@ -162,7 +162,39 @@ const RENDERERS: Record<NotificationType, (facts: NotificationFacts) => Notifica
     body: withReason(`Your application was ${f.outcome ?? "reviewed"}.`, f.reason),
     href: "/student/onboarding",
   }),
+
+  // Disputes (PRD §60–63). Sent to a vendor and to campus admins, so the wording
+  // states the case rather than taking the student's side: at this point nobody
+  // has decided anything, and copy that implied fault would prejudge it.
+  DISPUTE_RAISED: (f) => ({
+    title: "Case opened",
+    body: `A case was opened about ${ref(f.reference)} and needs review.`,
+    href: "/admin/disputes",
+  }),
+
+  // To the student. Deliberately says a person has it, because the complaint
+  // most often repeated about complaint systems is silence.
+  DISPUTE_UPDATED: (f) => ({
+    title: "Case under review",
+    body: `An admin is looking into your case ${ref(f.reference)}.`,
+    href: "/orders",
+  }),
+
+  DISPUTE_RESOLVED: (f) => ({
+    title: "Case closed",
+    body: withReason(`Your case ${ref(f.reference)} was closed.`, f.reason),
+    href: "/orders",
+  }),
+
+  // Separate from DISPUTE_RESOLVED because money moving is its own event: it is
+  // the one the student will look for, and it may be days after the decision.
+  REFUND_ISSUED: (f) => ({
+    title: "Refund on its way",
+    body: `${money(f.amountKobo)} is being returned to you for ${ref(f.reference)}. Your bank may take a few days to show it.`,
+    href: "/orders",
+  }),
 };
+
 
 export function renderNotification(
   type: NotificationType,
@@ -187,7 +219,12 @@ const PUSH_WORTHY: ReadonlySet<NotificationType> = new Set<NotificationType>([
   "DELIVERY_RETURNED",
   "DELIVERY_CANCELLED",
   "APPLICATION_REVIEWED",
+  // Money coming back is the one dispute event a student is actively waiting
+  // for. The other three are progress reports, and progress reports can wait
+  // for the inbox.
+  "REFUND_ISSUED",
 ]);
+
 
 export function shouldPush(type: NotificationType): boolean {
   return PUSH_WORTHY.has(type);

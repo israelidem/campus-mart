@@ -4,10 +4,12 @@ import { notFound, redirect } from "next/navigation";
 import { HandoverCode } from "@/components/delivery/handover-code";
 import { OrderCancelButton } from "@/components/orders/order-cancel-button";
 import { PayButton } from "@/components/payments/pay-button";
+import { DisputePanel } from "@/components/disputes/dispute-panel";
 import { DeliveryRatingPanel } from "@/components/ratings/delivery-rating-panel";
 import { Card } from "@/components/ui/card";
 import { getActor } from "@/lib/auth/session";
 import { listDeliveriesForStudentOrder } from "@/lib/delivery/delivery-service";
+import { getDisputeContext } from "@/lib/disputes/dispute-service";
 import { formatKobo } from "@/lib/money";
 import { getOrderForStudent } from "@/lib/orders/order-service";
 import { getDeliveryRatingState } from "@/lib/ratings/rating-service";
@@ -43,6 +45,15 @@ export default async function OrderPage({ params }: { params: Promise<{ orderId:
   // badly by the other (PRD §57).
   const ratingStates = await Promise.all(
     deliveries.map((delivery) => getDeliveryRatingState(actor, delivery.id)),
+  );
+
+  // Per vendor order, for the same reason: a complaint is against one store, and
+  // one store's failure says nothing about the other's (PRD §60).
+  const disputeContexts = await Promise.all(
+    order.vendorOrders.map(async (vendorOrder) => ({
+      vendorOrderId: vendorOrder.id,
+      context: await getDisputeContext(actor, vendorOrder.id),
+    })),
   );
 
 
@@ -84,6 +95,42 @@ export default async function OrderPage({ params }: { params: Promise<{ orderId:
           {vendorOrder.cancellationReason ? (
             <p className="mt-2 text-sm text-red-700">Cancelled: {vendorOrder.cancellationReason}</p>
           ) : null}
+
+          {(() => {
+            const entry = disputeContexts.find(
+              (item) => item.vendorOrderId === vendorOrder.id,
+            );
+            // Hidden entirely until the purchase is deliverable-and-delivered:
+            // offering a complaint form for a package still in transit invites
+            // cases the delivery engine would have resolved on its own.
+            if (!entry || (!entry.context.canFile && entry.context.disputes.length === 0)) {
+              return null;
+            }
+            return (
+              <div className="mt-3">
+                <DisputePanel
+                  context={{
+                    vendorOrderId: entry.vendorOrderId,
+                    storeName: entry.context.storeName,
+                    canFile: entry.context.canFile,
+                    reasonBlocked: entry.context.reasonBlocked,
+                    daysRemaining: entry.context.daysRemaining,
+                    disputes: entry.context.disputes.map((dispute) => ({
+                      id: dispute.id,
+                      reference: dispute.reference,
+                      status: dispute.status,
+                      reason: dispute.reason,
+                      description: dispute.description,
+                      resolution: dispute.resolution,
+                      resolutionNote: dispute.resolutionNote,
+                      refundAmountKobo: dispute.refundAmountKobo,
+                      createdAt: dispute.createdAt.toISOString(),
+                    })),
+                  }}
+                />
+              </div>
+            );
+          })()}
         </Card>
       ))}
 
