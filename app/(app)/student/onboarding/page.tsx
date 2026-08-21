@@ -11,6 +11,11 @@ import { getOnboardingState } from "@/lib/students/student-service";
  *
  * The state shown here is read on the server from the database, so the page can
  * never present a more permissive status than the student actually has.
+ *
+ * It is now also reachable from the account menu as "Verification", which is why
+ * the approved case says what was approved instead of only offering a link out:
+ * a student who opens this deliberately is asking about their standing, not
+ * looking for the marketplace.
  */
 export default async function StudentOnboardingPage() {
   const actor = await getActor();
@@ -46,9 +51,9 @@ export default async function StudentOnboardingPage() {
         <CardContent>
           <dl className="grid grid-cols-2 gap-2 text-sm">
             <dt className="opacity-60">Matric number</dt>
-            <dd>{state.matricNumber}</dd>
+            <dd className="font-mono">{state.matricNumber}</dd>
             <dt className="opacity-60">Submitted</dt>
-            <dd>{state.submittedAt?.toLocaleString() ?? "—"}</dd>
+            <dd className="font-mono">{state.submittedAt?.toLocaleString() ?? "—"}</dd>
             <dt className="opacity-60">Registry match</dt>
             <dd>{state.registryMatched ? "Found" : "Not found"}</dd>
           </dl>
@@ -62,12 +67,26 @@ export default async function StudentOnboardingPage() {
       <Card>
         <CardHeader>
           <CardTitle>You are verified</CardTitle>
-          <CardDescription>Your account has been approved by your campus admin.</CardDescription>
+          <CardDescription>
+            Your campus admin approved this account. You can buy, and you can apply to sell or to
+            deliver.
+          </CardDescription>
         </CardHeader>
-        <CardContent>
-          <Link className="underline" href="/marketplace">
-            Go to the marketplace
-          </Link>
+        <CardContent className="space-y-4">
+          <dl className="grid grid-cols-2 gap-2 text-sm">
+            <dt className="opacity-60">Matric number</dt>
+            <dd className="font-mono">{state.matricNumber ?? "—"}</dd>
+            <dt className="opacity-60">Department</dt>
+            <dd>{state.department ?? "—"}</dd>
+            <dt className="opacity-60">Level</dt>
+            <dd className="font-mono">{state.level ?? "—"}</dd>
+          </dl>
+
+          <p className="text-sm">
+            <Link className="underline" href="/marketplace">
+              Go to the marketplace
+            </Link>
+          </p>
         </CardContent>
       </Card>
     );
@@ -78,9 +97,7 @@ export default async function StudentOnboardingPage() {
       <Card>
         <CardHeader>
           <CardTitle>Account suspended</CardTitle>
-          <CardDescription>
-            Contact your campus admin for help with your account.
-          </CardDescription>
+          <CardDescription>Contact your campus admin for help with your account.</CardDescription>
         </CardHeader>
       </Card>
     );

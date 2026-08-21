@@ -1,133 +1,29 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
 import { getActor } from "@/lib/auth/session";
-import type { UserRole } from "@/lib/generated/prisma/enums";
+import { resolveShellContext } from "@/lib/navigation/capabilities";
+import { homeHref } from "@/lib/navigation/navigation";
 
 /**
- * Landing page.
+ * Landing page, for people who are not signed in.
  *
  * The design is built around the one artifact this product actually produces: a
  * delivery docket. Everything the server decides — price, fee, deadline, OTP,
  * reference — is set in mono, so the page teaches the app's own convention while
  * it sells it.
  *
- * It also doubles as the directory of what is built, so the link can be shared
- * and walked through. It lists destinations, it does not grant access: every page
- * resolves the actor server-side and turns the wrong role away, so an entry here
- * is never a way in.
+ * Anyone already signed in is sent to their own home instead. Before this, `/`
+ * served the sales pitch to everybody, so a student who opened the app each
+ * morning was greeted by an argument for a product they had already joined, with
+ * a "Continue" link as the only way in. Signing in should end the pitch.
+ *
+ * It used to double as a directory of every page in the app. That went with the
+ * shell: navigation now comes from one model that knows who is reading, and a
+ * hand-maintained list of admin URLs on the public page was both a maintenance
+ * burden and an invitation to a locked door.
  */
 
-type Destination = {
-  href: string;
-  label: string;
-  description: string;
-  /** Roles that can open it. `undefined` means anyone signed in. */
-  roles?: UserRole[];
-};
-
-type Area = {
-  title: string;
-  description: string;
-  destinations: Destination[];
-};
-
-const AREAS: Area[] = [
-  {
-    title: "Shopping",
-    description: "What a verified student can do today.",
-    destinations: [
-      {
-        href: "/marketplace",
-        label: "Marketplace",
-        description: "Browse approved vendors. Search, filter by category and price, sort.",
-      },
-      {
-        href: "/cart",
-        label: "Cart & checkout",
-        description: "One cart across several vendors. Pick a delivery location, place the order.",
-      },
-      {
-        href: "/orders",
-        label: "My orders",
-        description: "Invoices, per-vendor totals, delivery fee, and cancellation while unpaid.",
-      },
-    ],
-  },
-  {
-    title: "Selling",
-    description: "Any verified student can apply to sell.",
-    destinations: [
-      {
-        href: "/vendor/store",
-        label: "Store",
-        description: "Apply, upload storefront evidence, set operating hours.",
-      },
-      {
-        href: "/vendor/products",
-        label: "Products",
-        description: "Create products, set prices in naira, upload photos, adjust stock.",
-      },
-      {
-        href: "/vendor/orders",
-        label: "Incoming orders",
-        description: "Accept, prepare, mark ready for pickup. Your payout is shown per order.",
-      },
-    ],
-  },
-  {
-    title: "Delivering",
-    description: "Deliver between lectures. Applications are reviewed by your campus admin.",
-    destinations: [
-      {
-        href: "/agent",
-        label: "Agent console",
-        description: "Apply, go on duty, claim parcels from the campus pool, run the hand-over.",
-      },
-    ],
-  },
-  {
-    title: "Administration",
-    description: "Scoped to one campus, except where noted.",
-    destinations: [
-      {
-        href: "/admin/students",
-        label: "Students",
-        description: "Check registrations against the student registry, then verify or reject.",
-        roles: ["CAMPUS_ADMIN", "SUPER_ADMIN"],
-      },
-      {
-        href: "/admin/vendors",
-        label: "Vendors",
-        description: "Review queue, approvals, suspension and reinstatement.",
-        roles: ["CAMPUS_ADMIN", "SUPER_ADMIN"],
-      },
-      {
-        href: "/admin/agents",
-        label: "Delivery agents",
-        description: "Approve agents, and see the ones flagged for repeated cancellations.",
-        roles: ["CAMPUS_ADMIN", "SUPER_ADMIN"],
-      },
-      {
-        href: "/admin/delivery-locations",
-        label: "Delivery locations",
-        description: "Curate the destinations students can choose at checkout.",
-        roles: ["CAMPUS_ADMIN", "SUPER_ADMIN"],
-      },
-      {
-        href: "/admin/settings",
-        label: "Campus settings",
-        description: "Commission, delivery fee base and per-kilometre rate, floor and cap.",
-        roles: ["CAMPUS_ADMIN", "SUPER_ADMIN"],
-      },
-      {
-        href: "/super-admin/campuses",
-        label: "Campuses",
-        description: "Create campuses, assign campus admins, activate or suspend a campus.",
-        roles: ["SUPER_ADMIN"],
-      },
-    ],
-  },
-];
 
 /**
  * The hand-over, in the order it happens. Numbering is used here because the
@@ -173,15 +69,19 @@ const DOCKET_ROWS: { label: string; value: string }[] = [
 
 const OTP = ["4", "8", "2", "9", "1", "7"];
 
-function roleLabel(role: UserRole): string {
-  if (role === "CAMPUS_ADMIN") return "Campus Admin";
-  if (role === "SUPER_ADMIN") return "Super Admin";
-  if (role === "VENDOR") return "Vendor";
-  return "Student";
-}
-
 export default async function HomePage() {
   const actor = await getActor();
+
+  /*
+   * Signed in? Then this page is not for you. The destination comes from the
+   * navigation model, so "home" means the same thing here as it does in the
+   * header wordmark and after sign-in.
+   */
+  if (actor) {
+    if (actor.isSuspended) redirect("/suspended");
+    const { capabilities } = await resolveShellContext(actor);
+    redirect(homeHref(capabilities));
+  }
 
   return (
     <div className="flex w-full flex-1 flex-col bg-paper text-ink">
@@ -193,26 +93,18 @@ export default async function HomePage() {
           </span>
         </Link>
         <nav className="flex items-center gap-1 text-sm">
-          {actor ? (
-            <Link
-              href="/after-sign-in"
-              className="rounded-full bg-ink px-4 py-2 font-medium text-paper transition-transform hover:-translate-y-0.5"
-            >
-              Continue
-            </Link>
-          ) : (
-            <>
-              <Link href="/sign-in" className="px-3 py-2 font-medium underline decoration-rule underline-offset-4 hover:decoration-ink">
-                Sign in
-              </Link>
-              <Link
-                href="/sign-up"
-                className="rounded-full bg-ink px-4 py-2 font-medium text-paper transition-transform hover:-translate-y-0.5"
-              >
-                Create account
-              </Link>
-            </>
-          )}
+          <Link
+            href="/sign-in"
+            className="px-3 py-2 font-medium underline decoration-rule underline-offset-4 hover:decoration-ink"
+          >
+            Sign in
+          </Link>
+          <Link
+            href="/sign-up"
+            className="rounded-full bg-ink px-4 py-2 font-medium text-paper transition-transform hover:-translate-y-0.5"
+          >
+            Create account
+          </Link>
         </nav>
       </header>
 
@@ -234,45 +126,22 @@ export default async function HomePage() {
             </p>
 
             <div className="mt-7 flex flex-wrap items-center gap-3">
-              {actor ? (
-                <>
-                  {/* The destination is resolved server-side from the stored role,
-                      so this link cannot reach an area the actor lacks. */}
-                  <Link
-                    href="/after-sign-in"
-                    className="rounded-full bg-brand-700 px-6 py-3 font-medium text-paper transition-transform hover:-translate-y-0.5"
-                  >
-                    Continue as {roleLabel(actor.role).toLowerCase()}
-                  </Link>
-                  <Link
-                    href="/marketplace"
-                    className="rounded-full border border-ink px-6 py-3 font-medium transition-transform hover:-translate-y-0.5"
-                  >
-                    Browse the marketplace
-                  </Link>
-                </>
-              ) : (
-                <>
-                  <Link
-                    href="/sign-up"
-                    className="rounded-full bg-brand-700 px-6 py-3 font-medium text-paper transition-transform hover:-translate-y-0.5"
-                  >
-                    Create your account
-                  </Link>
-                  <Link
-                    href="/marketplace"
-                    className="rounded-full border border-ink px-6 py-3 font-medium transition-transform hover:-translate-y-0.5"
-                  >
-                    Look around first
-                  </Link>
-                </>
-              )}
+              <Link
+                href="/sign-up"
+                className="rounded-full bg-brand-700 px-6 py-3 font-medium text-paper transition-transform hover:-translate-y-0.5"
+              >
+                Create your account
+              </Link>
+              <Link
+                href="/sign-in"
+                className="rounded-full border border-ink px-6 py-3 font-medium transition-transform hover:-translate-y-0.5"
+              >
+                I already have an account
+              </Link>
             </div>
 
             <p className="mt-4 font-mono text-xs leading-relaxed text-ink-2">
-              {actor
-                ? `Signed in as ${actor.name} · ${roleLabel(actor.role)}`
-                : "Registration is checked against your school's student registry."}
+              Registration is checked against your school&apos;s student registry.
             </p>
           </div>
 
@@ -370,27 +239,29 @@ export default async function HomePage() {
           <div className="mt-6 grid gap-4 sm:grid-cols-3">
             {[
               {
-                href: "/marketplace",
                 title: "Buy",
                 body: "Order from approved vendors on your own campus and have it brought to your block.",
                 cta: "Browse the marketplace",
               },
               {
-                href: "/vendor/store",
                 title: "Sell",
                 body: "Run your shop from your phone: products, prices, stock, operating hours, orders.",
                 cta: "Apply to sell",
               },
               {
-                href: "/agent",
                 title: "Deliver",
                 body: "Take parcels between lectures. Claim from the pool, collect, hand over, get paid.",
                 cta: "Apply to deliver",
               },
             ].map((door) => (
+              /*
+               * All three doors lead to sign-up, because all three require a
+               * verified student account. Pointing a visitor at /vendor/store
+               * would bounce them to sign-in and lose which door they chose.
+               */
               <Link
-                key={door.href}
-                href={door.href}
+                key={door.title}
+                href="/sign-up"
                 className="group flex flex-col justify-between rounded-xl border border-rule bg-paper-2 p-5 transition-colors hover:border-ink"
               >
                 <div>
@@ -401,56 +272,6 @@ export default async function HomePage() {
                   {door.cta} →
                 </p>
               </Link>
-            ))}
-          </div>
-        </section>
-
-        {/* Directory of what is actually built. */}
-        <section className="border-t border-rule px-4 py-12">
-          <div className="max-w-prose">
-            <h2 className="font-display text-2xl font-extrabold tracking-tight sm:text-3xl">
-              Everything that is live
-            </h2>
-            <p className="mt-3 text-ink-2">
-              Each page checks your role and your campus on the server. Admin links will turn you
-              away unless you are one.
-            </p>
-          </div>
-
-          <div className="mt-8 grid gap-8 sm:grid-cols-2">
-            {AREAS.map((area) => (
-              <div key={area.title}>
-                <h3 className="font-mono text-[0.6875rem] uppercase tracking-[0.2em] text-ink-2">
-                  {area.title}
-                </h3>
-                <p className="mt-1.5 text-sm text-ink-2">{area.description}</p>
-                <ul className="mt-3">
-                  {area.destinations.map((destination, index) => (
-                    <li
-                      key={destination.href}
-                      className={`pb-3 ${index === 0 ? "" : "perforated pt-3"}`}
-                    >
-
-                      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                        <Link
-                          href={destination.href}
-                          className="font-medium underline decoration-rule underline-offset-4 hover:decoration-ink"
-                        >
-                          {destination.label}
-                        </Link>
-                        {destination.roles ? (
-                          <span className="font-mono text-[0.625rem] uppercase tracking-[0.14em] text-ink-2">
-                            {destination.roles.map(roleLabel).join(" / ")}
-                          </span>
-                        ) : null}
-                      </div>
-                      <p className="mt-1 text-sm leading-relaxed text-ink-2">
-                        {destination.description}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-              </div>
             ))}
           </div>
         </section>
