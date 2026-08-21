@@ -1,12 +1,12 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-16 (Phases 0–11 done). Written so work can continue on a
+Last updated: 2026-08-21 (Phases 0–12 done). Written so work can continue on a
 second machine (or by another developer/agent) without re-reading the whole
 codebase.
 
 Source of truth for scope: `docs/PRD.docx`. Build order and
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-11-report.md`.
+`docs/phase-0-report.md` … `docs/phase-12-report.md`.
 
 
 
@@ -30,10 +30,11 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 9 | Notifications & PWA: notification catalogue, in-app inbox, web push, manifest, service worker, offline page, installability | Done |
 | 10 | Ratings: per-delivery vendor + agent ratings, 24-hour edit window, admin moderation, stored aggregates, marketplace "top rated" sort and rating filter | Done |
 | 11 | Disputes & refunds: 7-day window, one live case per vendor order, partial refunds, payout-first attribution, admin queue | Done |
-| 12 | Admin analytics | **Next** |
-| 13–17 | Security hardening, performance, E2E, ABUAD pilot, production launch | Not started |
+| 12 | Admin analytics: campus dashboard, revenue/commission, order volume, delivery medians, dispute rate, vendor/product/location/agent standings | Done |
+| 13 | Security hardening | **Next** |
+| 14–17 | Performance, E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 244 tests / 16 files passing.
+Verification at handover: `npm run test` → 279 tests / 17 files passing.
 `npm run lint` → clean. `npm run build` → compiles and typechecks with no errors
 (a full Turbopack production build takes several minutes on a laptop; be patient
 rather than assuming it hung).
@@ -180,8 +181,9 @@ app/                 route handlers + pages, grouped by role
   marketplace/       browse + product detail            (students)
   cart/, orders/     cart, checkout, invoices           (students)
   agent/             delivery agent console             (students who deliver)
-  admin/             students, vendors, settings, delivery locations, agents
-
+  notifications/     in-app inbox
+  admin/             students, vendors, settings, delivery locations, agents,
+                     ratings, disputes, analytics
   super-admin/       campuses                           (platform owner)
   api/               all mutations; thin wrappers over lib/ services
 lib/
@@ -195,8 +197,11 @@ lib/
   orders/            cart view + service, order service, delivery locations
   delivery/          pricing, delivery state machine, agents, hand-over codes
   payments/          Paystack boundary, settlement maths, payment service
+  notifications/     copy catalogue, notify(), web push
+  ratings/           rating policy (pure) + rating service
+  disputes/          dispute policy (pure) + dispute/refund service
+  analytics/         analytics policy (pure) + dashboard aggregation
   audit/             audit log writer
-
   storage/           private document storage (R2 / local fallback)
   db/, money.ts, errors.ts, logger.ts, env.ts
 validations/         Zod schemas (one module per domain)
@@ -220,52 +225,94 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 12 should do next
+## 5. What Phase 13 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-Phase 12 is admin analytics (PRD §65–68). Unlike every phase before it, this one
-should add **almost no schema**: the numbers already exist as rows. Orders carry
-frozen totals, payments carry what was captured, `Refund` carries what went back,
-`DeliveryEvent` carries every state change with a timestamp, and both
-`VendorProfile` and `AgentProfile` carry rating aggregates. The work is reading
-them honestly, per campus, without a single `SELECT *` over a year of orders.
+Phase 13 is security hardening. Unlike Phase 12, which read what was already
+there, this phase mostly *removes* — it closes the doors the previous twelve
+phases left open because closing them early would have slowed the build. It adds
+almost no user-visible surface, which makes it the easiest phase to declare done
+without having done it. Do not.
 
-Expected shape:
+The list below is not invented; every item is a debt named in section 6 or a rule
+in Part X that has no enforcement point yet.
 
-1. **`lib/analytics/analytics-service.ts`** — one function per question a Campus
-   Admin actually asks: gross merchandise value, commission earned, refunds paid,
-   orders by status, delivery success rate, median time from payment to hand-over,
-   top stores, agent throughput. Every one takes `(actor, { from, to })` and every
-   one filters on `actor.campusId` in the query (Rule 25/29). A Super Admin may
-   pass an explicit `campusId`, or omit it for a platform-wide roll-up.
-2. **Aggregate in Postgres, not in Node.** Use `groupBy` and `aggregate`. If a
-   figure cannot be expressed that way, it probably needs a raw query with an
-   explicit index, not a loop over rows.
-3. **`validations/analytics.ts`** — the date range. Default to the last 30 days,
-   cap the span, and reject `from > to` rather than silently swapping them.
-4. **`GET /api/admin/analytics`** and **`GET /api/super-admin/analytics`**.
-5. **`/admin/analytics`** — a server component. This is the natural home for the
-   agent-rating view that Phase 10 deliberately did not build a student-facing
-   screen for.
-6. **Tests**: the pure parts. Bucketing a date range, computing a rate with a zero
-   denominator (a campus with no deliveries has *no* success rate, not 0%), and
-   formatting a duration. Do not test Prisma's `groupBy`.
+1. **Rate limiting on the routes that cost money or leak facts.** Sign-in and
+   sign-up (credential stuffing), `POST /api/students/register`, hand-over code
+   issuing and verification (a six-digit code is brute-forceable in minutes at
+   unlimited rate — this is the single most urgent item on the list), and every
+   payment initiation. Per-user *and* per-IP, since one attacker with one account
+   and one student behind a shared campus NAT are different problems.
+2. **Verification attempt limits on the hand-over code specifically.** Rate
+   limiting slows a brute force; a lockout after N wrong codes stops it. The
+   `DeliveryEvent` rows already record every attempt.
+3. **Security headers.** CSP, `Strict-Transport-Security`, `X-Content-Type-Options`,
+   `Referrer-Policy`, `Permissions-Policy`, in `next.config.ts`. Expect the CSP to
+   be the slow one: Paystack's inline checkout and the service worker both need
+   deliberate allowances, and a CSP that breaks payments is worse than none.
+4. **An upload allowlist that reads the bytes, not the filename.** `lib/storage`
+   accepts what it is handed. Check the magic number, cap the size, and never
+   serve an uploaded file with a `Content-Type` taken from the request.
+5. **Audit the audit log.** Rule: every privileged action writes one. Verify that
+   is actually true for all of Phases 8–12 — refunds, dispute resolutions, agent
+   escalations — rather than assuming it.
+6. **Webhook hardening.** The Paystack HMAC check exists; add replay protection
+   (reject an event id already processed) and confirm the raw body is used before
+   any parsing middleware can touch it.
+7. **A written campus-isolation audit.** Grep every `prisma.*.findMany` and prove
+   each one either filters on `actor.campusId` or is deliberately global. This is
+   mechanical, boring, and the single highest-value hour in the phase.
+8. **Session hardening**: cookie flags, absolute session lifetime, and revoking
+   sessions on a role change. A user demoted from Campus Admin must not keep
+   admin access until their cookie expires.
+9. **Tests**: rate-limiter policy (window arithmetic, per-key isolation), the
+   upload sniffing, and the header presence. All pure or near-pure.
 
 Two traps worth naming in advance:
 
-- **Money must stay integer kobo through every aggregate.** `_sum` returns
-  `number | null`; the `null` means "no rows", and rendering it as ₦0.00 tells a
-  Campus Admin their vendors sold nothing when in fact nobody asked the question
-  properly.
-- **`soldCount` counts placed orders, not delivered ones** (see section 6). Any
-  "top stores" panel built on it will flatter a store whose orders get cancelled.
-  Count from `VendorOrder` with a status filter instead.
+- **A rate limiter in module scope does not work on serverless.** Each Vercel
+  instance gets its own `Map`, so ten instances mean ten times the limit. Either
+  accept that explicitly and document it, or back it with Postgres/Upstash. Do not
+  ship an in-memory limiter while believing it enforces a global limit.
+- **Do not let hardening change a business rule by accident.** If a limit makes a
+  legitimate flow fail — a student legitimately re-issuing a hand-over code — that
+  is a bug in the limit, not an acceptable cost.
 
-Acceptance (PRD Phase 12): a Campus Admin sees revenue, commission, order volume,
-delivery performance and vendor/agent standings for their own campus and no other,
-over a range they choose.
+Acceptance (PRD Phase 13): the platform withstands the obvious attacks —
+credential stuffing, code brute-forcing, replayed webhooks, malicious uploads,
+cross-campus reads — and every privileged action leaves a trail.
+
+### Analytics: what a second machine needs to know
+
+- **`lib/analytics/analytics-policy.ts` is pure**: ranges, rates, medians,
+  comparisons and formatting. The clock is a parameter. Every rate returns `null`
+  for an empty denominator, and the UI renders `null` as "—" plus a sentence.
+  **Never render a missing metric as zero**; a campus with no deliveries does not
+  have a 0% success rate.
+- **Aggregate in Postgres.** The only two exceptions are the medians and the daily
+  series, which Prisma cannot express; both read a narrow projection and the
+  median reads are capped with `take`.
+- **Each `where` is typed against its own model** (`scopeVendorOrder`,
+  `scopeDelivery`, …) rather than one generic helper. A generic helper over
+  `Record<string, unknown>` compiles with a misspelt field, and a reporting bug
+  that returns plausible numbers is the hardest kind to notice.
+- **Revenue counts `COMPLETED` vendor orders; volume counts placed orders.** A
+  cancelled order is demand that happened and money that did not.
+- **Delivery fees come from `Payment` filtered on `paidAt`**, not from the order.
+  A fee is revenue when it was captured, in the period it was captured.
+- **Refunds net against the platform's share only** — the figure Phase 11's
+  `attributeRefund` produced. `netPlatformKobo` may therefore be negative, which is
+  why it is a plain `number` and printed by a local `formatSignedKobo` rather than
+  by weakening `formatKobo` for every caller.
+- **The query range is half-open and the displayed end is not the query end.** The
+  internal bound is the start of the day after `to`; a millisecond is subtracted
+  for display only. Never feed the display value back into arithmetic.
+- **The range is capped at 366 days in validation** because the daily series
+  allocates one bucket per day. If a campus outgrows that, add a nightly rollup
+  table — do not raise the cap.
+
 
 ### Disputes: what a second machine needs to know
 
@@ -400,11 +447,10 @@ over a range they choose.
   the platform account, not to the agent who earned it.
 
 
-- Agent ratings are collected, aggregated and moderated, but **no screen reads
-  them**. `AgentProfile` carries the same three columns as `VendorProfile`, with an
-  index. Surfacing a courier's score to the student about to meet them is a design
-  question (it invites refusing an agent); the admin-facing view belongs with
-  Phase 12's analytics.
+- Agent ratings are now readable by an admin on `/admin/analytics` (Phase 12), but
+  still **not by students**. Surfacing a courier's score to the student about to
+  meet them is a design question — it invites refusing an agent — and remains
+  deliberately unbuilt.
 - Individual review comments are not shown publicly — only the average and the
   count. Listing free text to strangers needs the moderation queue to be watched
   habitually, which is an operational decision for the pilot.
@@ -414,9 +460,21 @@ over a range they choose.
 - A rating hides/restores cleanly, but there is no way for a vendor or agent to
   reply to one. A reply is a second voice in what is currently one buyer's report
   of one delivery, and it needs its own moderation story.
+- **The analytics dashboard computes every figure on request.** Twenty-odd
+  aggregates run concurrently per page load, and the medians and daily series read
+  rows. Fine for a pilot campus; if a campus grows past a few thousand orders a
+  month, the fix is a nightly rollup table, not a wider `take`. Phase 14 territory.
+- **Analytics has no CSV export and no scheduled digest.** An admin who wants last
+  month's numbers in a spreadsheet has to read them off the screen. The service
+  returns plain objects, so an export route is small — it was left out because
+  nobody has asked for a specific format yet.
+- **Super Admin has no cross-campus roll-up screen.** The service accepts an
+  explicit `campusId`, so a Super Admin can read any single campus, but "all
+  campuses summed" is not built. Summing campuses that price delivery differently
+  needs a decision about what the total means.
 - Product images are stored privately and streamed by
   `/api/products/images/[imageId]`, which means no CDN caching for listing photos.
-  Revisit in Phase 13 (performance) if browse latency matters.
+  Revisit in Phase 14 (performance) if browse latency matters.
 - `soldCount` on `Product` is incremented at checkout and decremented when an
   unpaid order is cancelled, so "most popular" counts placed orders, not delivered
   ones. Revisit if that proves misleading once deliveries exist.
@@ -425,7 +483,7 @@ over a range they choose.
   told to set coordinates before the pilot.
 
 - Marketplace search uses `contains` with `mode: "insensitive"`. Adequate for the
-  ABUAD pilot; Phase 13 should consider Postgres full-text search or a trigram
+  ABUAD pilot; Phase 14 should consider Postgres full-text search or a trigram
   index if catalogues grow.
 
 - No email delivery is configured. Email verification is issued by Better Auth but

@@ -8,8 +8,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         <Link href="/" className="text-lg font-semibold">
           Campus Mart
         </Link>
-        <nav className="flex gap-4 text-sm">
+        <nav className="flex flex-wrap gap-4 text-sm">
+          <Link className="underline" href="/admin/analytics">
+            Analytics
+          </Link>
           <Link className="underline" href="/admin/students">
+
             Students
           </Link>
           <Link className="underline" href="/admin/vendors">
@@ -25,12 +29,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             Disputes
           </Link>
           <Link className="underline" href="/admin/settings">
-
-
             Settings
           </Link>
-
         </nav>
+
       </header>
       <main className="flex-1">{children}</main>
     </div>
