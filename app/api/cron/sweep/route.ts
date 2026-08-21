@@ -5,6 +5,7 @@ import { expireGoodsPayments, expirePickups } from "@/lib/delivery/delivery-serv
 import { env } from "@/lib/env";
 import { ForbiddenError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
+import { secretsMatch } from "@/lib/security/secrets";
 
 /**
  * The scheduled sweep (PRD §41, §47).
@@ -22,9 +23,14 @@ import { logger } from "@/lib/logger";
  *    here even though it is optional in the environment schema — a deployment
  *    without one gets a 403 rather than an unguarded endpoint.
  *
- * Both timing-safe comparison and the constant-time property are deliberately
- * not attempted: this is a fixed high-entropy string, and a length check plus
- * equality is what the platform's other secret comparisons do.
+ * Phase 13 replaced the `!==` here with `secretsMatch`, which is timing-safe. The
+ * previous comment claimed a plain comparison matched what the rest of the platform
+ * did; it did not — both the webhook HMAC and the hand-over code already used
+ * `timingSafeEqual`, and this was the one secret comparison that leaked how many
+ * leading characters were right. That is enough to recover it a character at a time.
+ *
+ * The check also runs against a *mandatory* secret: `CRON_SECRET` is optional in the
+ * environment schema, but an unset one means 403 rather than an open sweep.
  *
  * The response reports each sweep separately. "0 expired" is a useful answer —
  * it means the sweep ran and nothing was overdue, which is what a healthy
@@ -42,7 +48,7 @@ export const POST = apiHandler(async (request: Request): Promise<NextResponse> =
     request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
     request.headers.get("x-cron-secret");
 
-  if (header !== expected) {
+  if (!secretsMatch(header, expected)) {
     throw new ForbiddenError("Invalid cron secret");
   }
 

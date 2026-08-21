@@ -5,6 +5,7 @@ import { auth } from "@/lib/auth/auth";
 import { prisma } from "@/lib/db/prisma";
 import { ConflictError, ValidationError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
+import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { studentSignUpSchema } from "@/validations/student";
 
 /**
@@ -14,8 +15,17 @@ import { studentSignUpSchema } from "@/validations/student";
  * endpoint directly because campus membership and role must be decided by the
  * server: the campus is verified to exist and be active, and the role is always
  * STUDENT regardless of what the client sends.
+ *
+ * Rate limited by IP from Phase 13. There is no session to key on — that is the
+ * whole point of the endpoint — so the address is the only identity available, and
+ * five accounts an hour from one address is generous for a real hostel behind one
+ * NAT while still making bulk account creation pointless. Unlimited registration is
+ * not merely noise: every account is a row, an inbox, and a possible verification
+ * email, so it is a way to spend somebody else's money.
  */
 export const POST = apiHandler(async (request: Request): Promise<NextResponse> => {
+  await enforceRateLimit({ action: "STUDENT_REGISTRATION", headers: request.headers });
+
   const body = studentSignUpSchema.parse(await request.json());
 
   const campus = await prisma.campus.findUnique({

@@ -2,8 +2,17 @@ import { createHash, randomUUID } from "crypto";
 import { mkdir, readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 
-import { InternalError, ValidationError } from "@/lib/errors";
+import { InternalError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
+import {
+  ALLOWED_UPLOAD_TYPES,
+  assertAcceptableUpload,
+  extensionFor,
+  MAX_UPLOAD_BYTES,
+  safeContentType,
+  sniffUploadType,
+  type AllowedUploadType,
+} from "@/lib/security/upload-policy";
 
 /**
  * Private document storage (PRD §56).
@@ -32,52 +41,33 @@ export interface DocumentStorage {
   delete(storageKey: string): Promise<void>;
 }
 
-export const ALLOWED_DOCUMENT_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "application/pdf"] as const;
-export const MAX_DOCUMENT_BYTES = 5 * 1024 * 1024; // 5 MB
-
-const MIME_EXTENSIONS: Record<string, string> = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-  "application/pdf": "pdf",
-};
+/**
+ * Re-exported so the many existing callers keep one import site, while the policy
+ * itself lives in `lib/security/upload-policy.ts` where it can be unit tested
+ * without the filesystem (Phase 13).
+ */
+export const ALLOWED_DOCUMENT_MIME_TYPES = ALLOWED_UPLOAD_TYPES;
+export const MAX_DOCUMENT_BYTES = MAX_UPLOAD_BYTES;
 
 /**
- * Validates an uploaded file before it is stored. Content type is checked
- * against the magic bytes rather than trusting the declared type or extension.
+ * Validates an uploaded file and returns the type it *actually* is.
+ *
+ * Phase 13 inverted this check. It used to take the client's declared type and
+ * ask whether the bytes agreed; now the bytes decide and the declared type is
+ * only consulted to catch a contradiction. The return value matters: callers must
+ * store what came back here, not what the browser said, because the stored type is
+ * what a later `Content-Type` header is built from.
  */
-export function assertValidDocument(mimeType: string, bytes: Uint8Array): void {
-  if (!ALLOWED_DOCUMENT_MIME_TYPES.includes(mimeType as (typeof ALLOWED_DOCUMENT_MIME_TYPES)[number])) {
-    throw new ValidationError("Upload a JPEG, PNG, WebP or PDF file");
-  }
-  if (bytes.byteLength === 0) throw new ValidationError("The uploaded file is empty");
-  if (bytes.byteLength > MAX_DOCUMENT_BYTES) {
-    throw new ValidationError("Files must be 5 MB or smaller");
-  }
-  if (detectMimeType(bytes) !== mimeType) {
-    throw new ValidationError("The file contents do not match its type");
-  }
+export function assertValidDocument(mimeType: string, bytes: Uint8Array): AllowedUploadType {
+  return assertAcceptableUpload({ declaredType: mimeType, bytes }).type;
 }
 
-/** Minimal magic-byte sniffing for the formats we accept. */
+/**
+ * Magic-byte sniffing, kept as a named export because callers read it as
+ * documentation of what the platform accepts.
+ */
 export function detectMimeType(bytes: Uint8Array): string | null {
-  const startsWith = (...signature: number[]) =>
-    signature.every((byte, index) => bytes[index] === byte);
-
-  if (startsWith(0xff, 0xd8, 0xff)) return "image/jpeg";
-  if (startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
-  if (startsWith(0x25, 0x50, 0x44, 0x46)) return "application/pdf";
-  // WebP: "RIFF" .... "WEBP"
-  if (
-    startsWith(0x52, 0x49, 0x46, 0x46) &&
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45 &&
-    bytes[10] === 0x42 &&
-    bytes[11] === 0x50
-  ) {
-    return "image/webp";
-  }
-  return null;
+  return sniffUploadType(bytes);
 }
 
 function sanitisePrefix(prefix: string): string {
@@ -116,8 +106,13 @@ class LocalDocumentStorage implements DocumentStorage {
     mimeType: string;
     bytes: Uint8Array;
   }): Promise<StoredObject> {
-    const extension = MIME_EXTENSIONS[mimeType] ?? "bin";
-    const storageKey = `${sanitisePrefix(prefix)}/${randomUUID()}.${extension}`;
+    // Sniffed again here, at the last moment before bytes hit the disk. The
+    // service layer has already validated, so this is a second opinion rather
+    // than the first: it means a future caller that forgets to validate still
+    // cannot write a file whose extension and recorded type are attacker-chosen.
+    const verdict = assertAcceptableUpload({ declaredType: mimeType, bytes });
+
+    const storageKey = `${sanitisePrefix(prefix)}/${randomUUID()}.${extensionFor(verdict.type)}`;
     const target = this.resolve(storageKey);
 
     await mkdir(path.dirname(target), { recursive: true });
@@ -125,7 +120,8 @@ class LocalDocumentStorage implements DocumentStorage {
 
     return {
       storageKey,
-      mimeType,
+      // The sniffed type, not the declared one.
+      mimeType: verdict.type,
       sizeBytes: bytes.byteLength,
       checksum: createHash("sha256").update(bytes).digest("hex"),
     };
@@ -133,7 +129,10 @@ class LocalDocumentStorage implements DocumentStorage {
 
   async get(storageKey: string): Promise<{ bytes: Uint8Array; mimeType: string }> {
     const bytes = new Uint8Array(await readFile(this.resolve(storageKey)));
-    return { bytes, mimeType: detectMimeType(bytes) ?? "application/octet-stream" };
+    // Sniffed on the way out too, and narrowed by `safeContentType`, so a file
+    // that somehow got onto the disk by another route still cannot dictate the
+    // content type it is served with.
+    return { bytes, mimeType: safeContentType(sniffUploadType(bytes)) };
   }
 
   async delete(storageKey: string): Promise<void> {

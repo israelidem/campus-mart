@@ -1768,3 +1768,42 @@ model Refund {
   @@index([disputeId])
   @@index([succeededAt, createdAt])
 }
+
+// ---------------------------------------------------------------------------
+// Abuse controls (Phase 13)
+// ---------------------------------------------------------------------------
+
+/// One fixed-window counter for one actor and one action.
+///
+/// In Postgres rather than in memory, because the platform runs as serverless
+/// functions: an in-process `Map` gives each concurrently warm instance its own
+/// allowance, so a limit of five becomes five-per-instance — which is no limit at
+/// all, and worse, one that looks like it works in development.
+///
+/// The window index is part of `key` (see `lib/security/rate-limit-policy.ts`), so
+/// a new window is a new row instead of a row somebody has to remember to reset.
+/// That makes the whole increment a single `INSERT ... ON CONFLICT DO UPDATE SET
+/// hits = hits + 1 RETURNING hits`: atomic, one round trip, and correct when two
+/// instances race on the same key.
+///
+/// There is no `campusId` here, deliberately. Everything else on the platform is
+/// campus-scoped, but a limiter must be able to count requests from somebody who
+/// has not proved which campus they belong to — an unauthenticated sign-in attempt
+/// has an IP and nothing else.
+model RateLimitCounter {
+  /// `ACTION:scope:identifier:windowIndex`.
+  key String @id
+
+  /// Attempts counted in this window, including the ones that were refused.
+  hits Int @default(1)
+
+  /// End of the window. Only the sweep reads it; the decision itself comes from
+  /// the key. Stored so old rows can be deleted by one indexed comparison rather
+  /// than by parsing keys.
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt])
+}

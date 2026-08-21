@@ -4,6 +4,7 @@ import { apiHandler, jsonOk } from "@/lib/api/handler";
 import { requireActor } from "@/lib/auth/session";
 import { ValidationError } from "@/lib/errors";
 import type { DocumentType } from "@/lib/generated/prisma/enums";
+import { enforceRateLimit } from "@/lib/security/rate-limit";
 import { MAX_DOCUMENT_BYTES } from "@/lib/storage/storage";
 import { uploadVendorDocument } from "@/lib/vendors/vendor-service";
 
@@ -16,10 +17,20 @@ const ACCEPTED_TYPES = new Set<DocumentType>(["VENDOR_STOREFRONT", "VENDOR_IDENT
  * Any authenticated campus user may upload, because an applicant is not a
  * vendor yet; eligibility is enforced in the service layer and again at
  * submission.
+ *
+ * Rate limited from Phase 13, sharing the `DOCUMENT_UPLOAD` bucket with student
+ * onboarding: the limit protects storage and bandwidth, and it makes no difference
+ * to either which endpoint the bytes came through. Applied before `formData()` for
+ * the same reason as there — refusing after reading the body pays the cost anyway.
  */
 export const POST = apiHandler(async (request: Request): Promise<NextResponse> => {
   const actor = await requireActor();
 
+  await enforceRateLimit({
+    action: "DOCUMENT_UPLOAD",
+    userId: actor.userId,
+    headers: request.headers,
+  });
 
   const contentLength = Number(request.headers.get("content-length") ?? 0);
   if (contentLength > MAX_DOCUMENT_BYTES + 8 * 1024) {

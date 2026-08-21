@@ -1,12 +1,13 @@
 # Campus Mart — Handover
 
-Last updated: 2026-08-21 (Phases 0–12 done). Written so work can continue on a
+Last updated: 2026-08-21 (Phases 0–13 done). Written so work can continue on a
 second machine (or by another developer/agent) without re-reading the whole
 codebase.
 
 Source of truth for scope: `docs/PRD.docx`. Build order and
 non-negotiable business rules come from there. Per-phase detail lives in
-`docs/phase-0-report.md` … `docs/phase-12-report.md`.
+`docs/phase-0-report.md` … `docs/phase-13-report.md`, and the campus-isolation
+audit in `docs/campus-isolation-audit.md`.
 
 
 
@@ -31,10 +32,11 @@ non-negotiable business rules come from there. Per-phase detail lives in
 | 10 | Ratings: per-delivery vendor + agent ratings, 24-hour edit window, admin moderation, stored aggregates, marketplace "top rated" sort and rating filter | Done |
 | 11 | Disputes & refunds: 7-day window, one live case per vendor order, partial refunds, payout-first attribution, admin queue | Done |
 | 12 | Admin analytics: campus dashboard, revenue/commission, order volume, delivery medians, dispute rate, vendor/product/location/agent standings | Done |
-| 13 | Security hardening | **Next** |
-| 14–17 | Performance, E2E, ABUAD pilot, production launch | Not started |
+| 13 | Security hardening: Postgres-backed rate limiting, sniff-first uploads, CSP and response headers, timing-safe secret comparison, webhook body cap, campus-isolation audit | Done |
+| 14 | Performance & polish | **Next** |
+| 15–17 | E2E, ABUAD pilot, production launch | Not started |
 
-Verification at handover: `npm run test` → 279 tests / 17 files passing.
+Verification at handover: `npm run test` → 379 tests / 23 files passing.
 `npm run lint` → clean. `npm run build` → compiles and typechecks with no errors
 (a full Turbopack production build takes several minutes on a laptop; be patient
 rather than assuming it hung).
@@ -202,6 +204,8 @@ lib/
   disputes/          dispute policy (pure) + dispute/refund service
   analytics/         analytics policy (pure) + dashboard aggregation
   audit/             audit log writer
+  security/          rate limiting, request identity, upload policy, headers,
+                     timing-safe secret comparison
   storage/           private document storage (R2 / local fallback)
   db/, money.ts, errors.ts, logger.ts, env.ts
 validations/         Zod schemas (one module per domain)
@@ -225,64 +229,88 @@ Conventions that must be preserved
 - **State changes are named operations inside a transaction** that re-read the row
   and assert the current state — never a bare status assignment.
 
-## 5. What Phase 13 should do next
+## 5. What Phase 14 should do next
 
 Follow the PRD's per-feature order: schema → migration → service → validation →
 authorization → API → UI → tests.
 
-Phase 13 is security hardening. Unlike Phase 12, which read what was already
-there, this phase mostly *removes* — it closes the doors the previous twelve
-phases left open because closing them early would have slowed the build. It adds
-almost no user-visible surface, which makes it the easiest phase to declare done
-without having done it. Do not.
+Phase 14 is performance and polish. It is the mirror image of Phase 13: that phase
+added guards nobody sees, this one removes cost nobody measured. The trap is
+different too — performance work is easy to *do* and hard to *justify*, so measure
+before changing anything. A "fix" for a query that was never slow is a new bug with
+no upside.
 
-The list below is not invented; every item is a debt named in section 6 or a rule
-in Part X that has no enforcement point yet.
+The list below is drawn from debts named in section 6, plus what Phase 13 left
+behind on purpose.
 
-1. **Rate limiting on the routes that cost money or leak facts.** Sign-in and
-   sign-up (credential stuffing), `POST /api/students/register`, hand-over code
-   issuing and verification (a six-digit code is brute-forceable in minutes at
-   unlimited rate — this is the single most urgent item on the list), and every
-   payment initiation. Per-user *and* per-IP, since one attacker with one account
-   and one student behind a shared campus NAT are different problems.
-2. **Verification attempt limits on the hand-over code specifically.** Rate
-   limiting slows a brute force; a lockout after N wrong codes stops it. The
-   `DeliveryEvent` rows already record every attempt.
-3. **Security headers.** CSP, `Strict-Transport-Security`, `X-Content-Type-Options`,
-   `Referrer-Policy`, `Permissions-Policy`, in `next.config.ts`. Expect the CSP to
-   be the slow one: Paystack's inline checkout and the service worker both need
-   deliberate allowances, and a CSP that breaks payments is worse than none.
-4. **An upload allowlist that reads the bytes, not the filename.** `lib/storage`
-   accepts what it is handed. Check the magic number, cap the size, and never
-   serve an uploaded file with a `Content-Type` taken from the request.
-5. **Audit the audit log.** Rule: every privileged action writes one. Verify that
-   is actually true for all of Phases 8–12 — refunds, dispute resolutions, agent
-   escalations — rather than assuming it.
-6. **Webhook hardening.** The Paystack HMAC check exists; add replay protection
-   (reject an event id already processed) and confirm the raw body is used before
-   any parsing middleware can touch it.
-7. **A written campus-isolation audit.** Grep every `prisma.*.findMany` and prove
-   each one either filters on `actor.campusId` or is deliberately global. This is
-   mechanical, boring, and the single highest-value hour in the phase.
-8. **Session hardening**: cookie flags, absolute session lifetime, and revoking
-   sessions on a role change. A user demoted from Campus Admin must not keep
-   admin access until their cookie expires.
-9. **Tests**: rate-limiter policy (window arithmetic, per-key isolation), the
-   upload sniffing, and the header presence. All pure or near-pure.
+1. **Sweep the rate-limit counters.** `RateLimitCounter` rows are dead once their
+   window ends but nothing deletes them, and the table takes a write on every
+   limited request. `expiresAt` is indexed for exactly this; add a
+   `deleteMany({ where: { expiresAt: { lt: now } } })` to `/api/cron/sweep`
+   alongside the notification prune. This is the one item on the list that is not
+   optional — it is a table that grows forever.
+2. **Signed URLs for product images.** `/api/products/images/[imageId]` streams
+   every listing photo through a serverless function with `no-store` (Phase 13),
+   which is right for a student's ID card and wrong for a marketplace grid. Short-
+   lived signed R2 URLs let the CDN cache the bytes without making them public.
+   Documents must keep the current path — do not "simplify" by treating both the
+   same.
+3. **The analytics dashboard computes twenty-odd aggregates per page load.** Fine
+   for a pilot; a nightly rollup table is the fix if a campus outgrows it. Measure
+   first: the aggregates run concurrently, and Postgres may well be fine.
+4. **Marketplace search is `contains` with `mode: "insensitive"`**, which cannot
+   use an index. Postgres full-text or a trigram index if catalogues grow.
+5. **The agent console has no live countdown.** Deadlines update on refresh or on
+   the bell's poll. This is polish, but it is the polish agents will notice.
+6. **Audit the audit log.** Phase 13 did not get to this. The rule is that every
+   privileged action writes one; verify it holds for Phases 8–12 — refunds,
+   dispute resolutions, agent escalations — rather than assuming it.
+7. **Session hardening.** Also deferred from Phase 13, and worth doing before the
+   pilot: absolute session lifetime, and revoking sessions on a role change. A user
+   demoted from Campus Admin currently keeps admin access until their cookie
+   expires.
 
 Two traps worth naming in advance:
 
-- **A rate limiter in module scope does not work on serverless.** Each Vercel
-  instance gets its own `Map`, so ten instances mean ten times the limit. Either
-  accept that explicitly and document it, or back it with Postgres/Upstash. Do not
-  ship an in-memory limiter while believing it enforces a global limit.
-- **Do not let hardening change a business rule by accident.** If a limit makes a
-  legitimate flow fail — a student legitimately re-issuing a hand-over code — that
-  is a bug in the limit, not an acceptable cost.
+- **Do not weaken a Phase 13 header to make something faster.** `no-store` on
+  documents and `script-src 'self'` are both load-bearing. If caching a document
+  would help, the answer is a signed URL, not a longer `max-age`.
+- **`npx prisma generate` before you trust a typecheck.** Still true, still the
+  thing that has bitten this project hardest.
 
-Acceptance (PRD Phase 13): the platform withstands the obvious attacks —
-credential stuffing, code brute-forcing, replayed webhooks, malicious uploads,
-cross-campus reads — and every privileged action leaves a trail.
+Acceptance (PRD Phase 14): the platform is fast enough on a 3G phone that nobody
+notices it, and no table grows without bound.
+
+### Security: what a second machine needs to know
+
+- **`lib/security/rate-limit-policy.ts` is pure and clock-free**; the store and the
+  clock belong to `lib/security/rate-limit.ts`. Add a new limit by naming it in
+  `RATE_LIMITS` and calling `enforceRateLimit` in the route — never by inventing a
+  counter somewhere else.
+- **The counter is one atomic upsert with `RETURNING hits`.** That ordering is the
+  whole correctness argument: increment first, judge the returned number second.
+  Two instances that both *read* 9 and both decide "one left" have let 11 through.
+  Do not refactor this into a read followed by a write.
+- **Never use an in-memory limiter here.** Each serverless instance gets its own
+  memory, so ten instances mean ten times the limit — and it looks like it works in
+  development, where there is one process.
+- **Limits are keyed by user and IP, never by campus.** A campus-keyed limit lets
+  one abusive account exhaust its whole campus's allowance.
+- **`clientIp` returns `null`, not `"unknown"`.** A shared placeholder is a shared
+  bucket. Null means the IP scope is skipped and the user scope still applies.
+- **Uploads: the bytes decide the type.** `assertAcceptableUpload` sniffs, and the
+  *sniffed* value is what gets stored and later served. Never put a request's
+  `Content-Type` into a response. `safeContentType` runs on the way out too, so a
+  pre-Phase-13 row cannot become a served content type.
+- **SVG is deliberately not an accepted upload type.** It is a valid image that can
+  carry script. Adding it to `ALLOWED_UPLOAD_TYPES` would be stored XSS.
+- **Response headers live in `lib/security/headers.ts`, not in `next.config.ts`.**
+  They are pure functions so `tests/security-headers.test.ts` can assert them — a
+  silently-dropped header is the normal way this work gets undone. If a CSP change
+  breaks Paystack or the service worker, fix the directive; do not delete the
+  policy.
+- **Compare secrets with `secretsMatch`, never `===`.** String equality stops at
+  the first differing byte and leaks how many characters matched.
 
 ### Analytics: what a second machine needs to know
 
@@ -473,8 +501,24 @@ cross-campus reads — and every privileged action leaves a trail.
   campuses summed" is not built. Summing campuses that price delivery differently
   needs a decision about what the total means.
 - Product images are stored privately and streamed by
-  `/api/products/images/[imageId]`, which means no CDN caching for listing photos.
-  Revisit in Phase 14 (performance) if browse latency matters.
+  `/api/products/images/[imageId]`, which means no CDN caching for listing photos —
+  and since Phase 13 the response also carries `no-store`, so there is no browser
+  cache either. Correct for a document, expensive for a marketplace grid; signed
+  R2 URLs are the Phase 14 fix.
+- **`RateLimitCounter` grows without bound.** Rows are dead once their window ends
+  and nothing deletes them. `expiresAt` is indexed for the sweep that does not yet
+  exist — first item in Phase 14, and the only one that is not optional.
+- **Rate limits are hard-coded constants, not campus settings.** `RATE_LIMITS` in
+  `lib/security/rate-limit-policy.ts` is the single place to change them, but
+  nothing reads them per campus.
+- **Better Auth's own rate limiter and ours both cover credentials.** Both are
+  cheap and fail in the same direction, so the redundancy was left rather than
+  tuned.
+- **Session hardening was deferred out of Phase 13.** There is no absolute session
+  lifetime and no revocation on role change: a user demoted from Campus Admin keeps
+  admin access until their cookie expires. Worth closing before the pilot.
+- **The audit-log audit was deferred too.** The rule says every privileged action
+  writes one; that has not been verified end-to-end for Phases 8–12.
 - `soldCount` on `Product` is incremented at checkout and decremented when an
   unpaid order is cancelled, so "most popular" counts placed orders, not delivered
   ones. Revisit if that proves misleading once deliveries exist.
