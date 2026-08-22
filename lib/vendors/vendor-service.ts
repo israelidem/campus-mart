@@ -18,6 +18,7 @@ import {
 } from "@/lib/storage/storage";
 import {
   defaultOperatingHours,
+  formatMinuteOfDay,
   isWithinOperatingHours,
   type OperatingHoursDay,
 } from "@/lib/vendors/operating-hours";
@@ -802,4 +803,132 @@ export async function listStorefronts(
     isOpenNow:
       vendor.acceptingOrders && isWithinOperatingHours(vendor.operatingHours, now, timezone),
   }));
+}
+
+export type StorefrontDetail = StorefrontSummary & {
+  ratingAverage: string | null;
+  ratingCount: number;
+  /** Monday-first schedule, pre-formatted for display. */
+  schedule: { dayOfWeek: number; label: string; hours: string | null }[];
+  /** Distinct categories this store actually sells in, for in-store filtering. */
+  categories: { id: string; name: string; slug: string }[];
+  productCount: number;
+};
+
+/**
+ * The display week, Monday first.
+ *
+ * Paired rather than indexed by `dayOfWeek`, so the label can never be
+ * `undefined` under `noUncheckedIndexedAccess` and the ordering is stated once
+ * instead of being implied by a separate sort array.
+ */
+const DISPLAY_WEEK = [
+  { dayOfWeek: 1, label: "Monday" },
+  { dayOfWeek: 2, label: "Tuesday" },
+  { dayOfWeek: 3, label: "Wednesday" },
+  { dayOfWeek: 4, label: "Thursday" },
+  { dayOfWeek: 5, label: "Friday" },
+  { dayOfWeek: 6, label: "Saturday" },
+  { dayOfWeek: 0, label: "Sunday" },
+] as const;
+
+/**
+ * One approved storefront on the actor's campus (§11 of the redesign brief).
+ *
+ * Deliberately a sibling of `listStorefronts` rather than a filter over it: the
+ * store page needs ratings, a formatted week and the store's category list,
+ * none of which belong on a card in a list of twenty.
+ *
+ * Isolation matches `listStorefronts` exactly — campus and `status: APPROVED`
+ * are both in the `where`, so a pending, rejected or suspended store, or one on
+ * another campus, is never returned rather than being hidden by the page. The
+ * caller turns that absence into a 404, so an id cannot confirm that a store
+ * exists elsewhere.
+ *
+ * `ratingAverage` is a string for the same reason as in the marketplace
+ * service: `null` means "no ratings yet", which must not collapse to `0` and
+ * read as the worst store on campus.
+ */
+export async function getStorefront(
+  actor: Actor,
+  vendorProfileId: string,
+): Promise<StorefrontDetail> {
+  const campusId = actor.campusId;
+  if (!campusId) throw new ForbiddenError("Your account is not associated with a campus");
+
+  const [campus, vendor] = await Promise.all([
+    prisma.campus.findUnique({ where: { id: campusId }, select: { timezone: true } }),
+    prisma.vendorProfile.findFirst({
+      where: { id: vendorProfileId, campusId, status: "APPROVED" },
+      include: {
+        operatingHours: {
+          orderBy: { dayOfWeek: "asc" },
+          select: { dayOfWeek: true, isClosed: true, opensAt: true, closesAt: true },
+        },
+      },
+    }),
+  ]);
+  if (!vendor) throw new NotFoundError("Store not found");
+
+  const timezone = campus?.timezone ?? "Africa/Lagos";
+
+  // Only categories with a product a student could actually buy, so the filter
+  // row can never offer a tab that leads to an empty shelf.
+  //
+  // These predicates mirror `buildMarketplaceWhere`'s defaults deliberately
+  // (`deletedAt: null`, `isAvailable`, `stockQuantity > 0`). The store page
+  // shelf is rendered by `searchProducts`, so counting under looser rules here
+  // would advertise a category tab the shelf then renders empty.
+  const grouped = await prisma.product.groupBy({
+    by: ["categoryId"],
+    where: {
+      vendorProfileId: vendor.id,
+      campusId,
+      deletedAt: null,
+      isAvailable: true,
+      stockQuantity: { gt: 0 },
+    },
+    _count: { _all: true },
+  });
+
+  const categoryIds = grouped
+    .map((row) => row.categoryId)
+    .filter((id): id is string => id !== null);
+
+  const categories = categoryIds.length
+    ? await prisma.category.findMany({
+        where: { id: { in: categoryIds } },
+        orderBy: { name: "asc" },
+        select: { id: true, name: true, slug: true },
+      })
+    : [];
+
+  // Monday first: a student reading opening hours thinks in weeks, not in the
+  // 0-is-Sunday convention the rows are stored in.
+  const schedule = DISPLAY_WEEK.map(({ dayOfWeek, label }) => {
+    const day = vendor.operatingHours.find((row) => row.dayOfWeek === dayOfWeek);
+    const hours =
+      !day || day.isClosed || day.opensAt === null || day.closesAt === null
+        ? null
+        : `${formatMinuteOfDay(day.opensAt)} – ${formatMinuteOfDay(day.closesAt)}`;
+    return { dayOfWeek, label, hours };
+  });
+
+  return {
+    id: vendor.id,
+    storeName: vendor.storeName,
+    slug: vendor.slug,
+    description: vendor.description,
+    storefrontLocation: vendor.storefrontLocation,
+    acceptingOrders: vendor.acceptingOrders,
+    isOpenNow:
+      vendor.acceptingOrders &&
+      isWithinOperatingHours(vendor.operatingHours, new Date(), timezone),
+    ratingAverage:
+      vendor.ratingCount > 0 ? (vendor.ratingAverageHundredths / 100).toFixed(1) : null,
+    ratingCount: vendor.ratingCount,
+    schedule,
+    categories,
+    productCount: grouped.reduce((total, row) => total + row._count._all, 0),
+  };
 }

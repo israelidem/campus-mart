@@ -100,9 +100,11 @@ generic dashboard.
 Still missing at the end of this pass, and **not** claimed as done:
 
 - Forgot password / reset password
-- Public vendor storefront page (vendor links resolve to a filtered marketplace
-  view, which works but is not the storefront described in §11)
 - Category listing page (category tiles filter the marketplace instead)
+
+Closed since the first pass:
+
+- ~~Public vendor storefront page~~ — built, see §6.
 
 
 ---
@@ -184,6 +186,23 @@ quiet campus shows fewer sections rather than empty boxes (§28).
   became a −/+ stepper (its native spinners are far under 44px), success became a
   toast carrying a "View cart" action, and a `router.refresh()` was added so the
   header count stops showing a stale cart.
+- `app/(app)/store/[vendorProfileId]/page.tsx` — the vendor storefront (§11),
+  **a route that did not previously exist.** Both the product card and the
+  product detail page named a vendor, so the marketplace was full of vendor names
+  that were not links: a student could see who sold a thing but never see what
+  else they sold. The page leads with the operational facts — open/closed
+  computed from real `VendorOperatingHours` in the campus timezone, rating,
+  category mix, item count, storefront location — then the shelf. Products are
+  rendered by the existing `searchProducts` service, so the shelf, its
+  category filter and its pagination are the same code path (and the same campus
+  scoping) as the main marketplace rather than a parallel query.
+
+  This required one new backend function, `getStorefront()` in
+  `lib/vendors/vendor-service.ts`. It is additive: existing vendor functions are
+  untouched, and it reuses `assertSameCampus` and the operating-hours helper
+  instead of restating either. `vendorHref()` in `components/marketplace/cards.tsx`
+  now points at it, which is what turned every vendor name in the app into a
+  working link.
 
 **Honest note on the landing page's numbers.** Every figure is queried live. The
 proof strip renders *only* when there are ≥5 vendors and ≥20 products; below that
@@ -287,6 +306,34 @@ and falls back to zeroed data; every consumer already handles empty arrays, and
 
 ---
 
+## 7bb. Three lint errors in my own primitives
+
+`npm run lint` rejected three files — `account-menu.tsx`, `sheet.tsx`,
+`toast.tsx`. All three were mine, and all three were the same mistake:
+`setState` called synchronously inside an effect.
+
+It would have been a two-minute job to disable the rule. It was not disabled,
+because in one of the three the rule was describing a real visual defect. The
+account menu resolved its breakpoint with `useState(false)` plus an effect that
+immediately called `setIsDesktop(query.matches)`. That renders **false** first,
+commits it, then corrects — so a desktop user could see the mobile bottom sheet
+appear and snap into a dropdown. Fixing §6 with a component that flickers between
+the two presentations is not fixing §6.
+
+- `lib/hooks/browser.ts` (new) — `useMediaQuery` and `useIsHydrated`, both built
+  on `useSyncExternalStore`, which takes an explicit server snapshot and so gets
+  the first render right instead of correcting it. The account menu and the toast
+  portal now use these.
+- `ConfirmDialog` was clearing its reason textarea with an effect on close, so a
+  reason typed for one rejection would not leak into the next. The `open` check
+  moved one component up, and the body — which owns the state — unmounts. The
+  reset is now structural rather than a cleanup step that can be forgotten.
+
+Worth stating plainly: the CSP bug in §7b was also invisible to a green test
+suite. Two for two, the tooling was right and the code was wrong.
+
+---
+
 ## 7c. An audit finding that was simply wrong
 
 §1 and §4 of this document originally recorded the product detail page as
@@ -314,8 +361,9 @@ presentation change plus one component upgrade.
 
 **Correction to the process.** Every remaining "MISSING" in §4 has since been
 confirmed by opening the path, not by inferring from appearance. The vendor
-storefront is genuinely absent (no file at any `store/` path); forgot-password is
-genuinely absent (no route, and Better Auth's `forgetPassword` is never called).
+storefront was genuinely absent — no file at any `store/` path — and has since
+been built (§6). Forgot-password is genuinely absent: no route, and Better Auth's
+`forgetPassword` is never called anywhere in the codebase.
 
 ---
 
@@ -329,10 +377,11 @@ Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
    finding was wrong.** See §7c. The route existed and worked; what was missing
    was the design. Now rebuilt to §12 (snap gallery, quantity stepper, sticky
    mobile CTA), so this item is **closed**.
-2. **Public vendor storefront does not exist** (§11). `VendorCard` and the
-   category tiles resolve to `/marketplace?vendorProfileId=…` — a filtered
-   catalogue. Functional, and not a dead link, but it is not a storefront: no
-   store header, rating, opening status or delivery estimate.
+2. ~~**Public vendor storefront does not exist** (§11).~~ **Closed.** Built at
+   `/store/[vendorProfileId]` with a real store header (live open/closed, rating,
+   category mix, location) over the shared `searchProducts` shelf. Every
+   `VendorCard`, product card byline and product-detail vendor block now links to
+   it.
 3. **Sign-up is still a single-page form.** The four-step flow in §13 is not built.
 4. **Forgot-password does not exist.** The sign-in page currently links to email
    verification instead, which is honest but incomplete.
@@ -351,12 +400,27 @@ Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
    render (`/` → 200, `/sign-in` → 200, `/marketplace` → 307 for anonymous
    visitors), but no screen has been *visually inspected* at 320/375/390/430px.
    This must happen before launch.
-10. **Seed data (§27).** `prisma/seed.ts` exists but has not been verified to
-    produce a marketplace rich enough to evaluate the UI against. Until it is, the
-    discovery home will mostly render its empty state on a local database.
+10. ~~**Seed data (§27).**~~ **Closed.** `prisma/seed.ts` is a bootstrap seed by
+    design (owner + first campus only), so a second script was added rather than
+    changing it: `prisma/seed-demo.ts`, run with `npm run db:seed:demo`. It writes
+    5 approved stores, 8 campus categories and 25 priced, stocked products through
+    Prisma, creates the vendor logins through Better Auth so they can actually sign
+    in, and refuses to run against `NODE_ENV=production` without an explicit
+    override. Two stores are left unrated and one product is left at zero stock on
+    purpose, so the "no ratings yet" and stock-filtered paths are exercised by real
+    data instead of being taken on trust.
+
+    Verified end to end rather than assumed: signed in as a seeded vendor and
+    fetched the rendered HTML, confirming the discovery home contains
+    `Campus Bites`, `Jollof`, `Hostel Mart` and the category rail, and that
+    `/store/…` returns the store header (`Open now`, `4.8`) alongside
+    `Chicken & Chips` and `Egusi`. `scripts/verify-routes.ts` reports data depth
+    and route status together so this stays a one-command check.
 
 ### Suggested next step
 
-Build `app/(app)/store/[vendorProfileId]/page.tsx` (§11) — the last structural
-gap in `Discover → Shop`. Then re-skin cart and checkout so the second half of
-the spine matches the first.
+Re-skin cart, checkout and invoice, so the second half of the
+`Discover → Shop → Checkout → Receive` spine matches the first. After that, the
+§25 visual pass at 320/375/390/430px — item 9 above is the last thing standing
+between this and a defensible launch claim, and it needs a real device or an
+emulator rather than more reasoning.

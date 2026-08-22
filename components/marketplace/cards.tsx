@@ -65,18 +65,18 @@ export function productImageSrc(imageId: string | null): string | null {
  * `/marketplace/[productId]` and takes an **id**, not a slug — a card built
  * against `/products/[slug]` would compile, look correct, and 404 on every tap.
  *
- * There is no `/vendors/[slug]` route in this application. Rather than link to
- * one and leave a dead end, a store links to the marketplace filtered by that
- * store, which is a real screen backed by the existing `vendorProfileId` filter
- * in `marketplaceQuerySchema`. When a dedicated storefront route exists, this is
- * the single place that changes.
+ * A store links to `/store/[vendorProfileId]` — the storefront, which shows the
+ * shop itself (rating, opening hours, pick-up point, its own category filter),
+ * not a search result. It takes the profile **id** for the same reason as
+ * products: `slug` is only unique per campus, so a slug route would need a
+ * campus in the path to be addressable at all.
  */
 export function productHref(productId: string): string {
   return `/marketplace/${productId}`;
 }
 
 export function vendorHref(vendorProfileId: string): string {
-  return `/marketplace?vendorProfileId=${encodeURIComponent(vendorProfileId)}`;
+  return `/store/${encodeURIComponent(vendorProfileId)}`;
 }
 
 export function categoryHref(categorySlug: string): string {

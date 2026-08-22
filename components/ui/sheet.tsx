@@ -214,7 +214,38 @@ export function Sheet({
  * stays disabled until a reason is typed, because these reasons are written to
  * the audit log and shown to the person affected.
  */
-export function ConfirmDialog({
+type ConfirmDialogProps = {
+  open: boolean;
+  onClose: () => void;
+  onConfirm: (reason?: string) => void;
+  title: string;
+  description?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  tone?: "danger" | "primary";
+  isLoading?: boolean;
+  requireReason?: boolean;
+  reasonLabel?: string;
+  reasonPlaceholder?: string;
+};
+
+/**
+ * The `open` check lives here, one level above the state, on purpose.
+ *
+ * A reason typed for one rejection must never be pre-filled for the next student
+ * in the queue. The obvious way to guarantee that is an effect that clears the
+ * field on close — but that is a `setState` inside an effect, which renders the
+ * stale value once before correcting it. Unmounting the body instead makes the
+ * reset structural: there is no old value to clear because there is no
+ * component. `Sheet` already renders nothing while closed, so this changes
+ * nothing visually.
+ */
+export function ConfirmDialog(props: ConfirmDialogProps) {
+  if (!props.open) return null;
+  return <ConfirmDialogBody {...props} />;
+}
+
+function ConfirmDialogBody({
   open,
   onClose,
   onConfirm,
@@ -227,28 +258,9 @@ export function ConfirmDialog({
   requireReason = false,
   reasonLabel = "Reason",
   reasonPlaceholder,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onConfirm: (reason?: string) => void;
-  title: string;
-  description?: string;
-  confirmLabel?: string;
-  cancelLabel?: string
-  tone?: "danger" | "primary";
-  isLoading?: boolean;
-  requireReason?: boolean;
-  reasonLabel?: string;
-  reasonPlaceholder?: string;
-}) {
+}: ConfirmDialogProps) {
   const [reason, setReason] = React.useState("");
   const reasonId = React.useId();
-
-  // Clearing on close matters: a reason typed for one rejection must not be
-  // pre-filled for the next student in the queue.
-  React.useEffect(() => {
-    if (!open) setReason("");
-  }, [open]);
 
   const canConfirm = !requireReason || reason.trim().length > 0;
 

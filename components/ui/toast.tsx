@@ -3,6 +3,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 
+import { useIsHydrated } from "@/lib/hooks/browser";
 import { cn } from "@/lib/utils";
 
 /**
@@ -56,10 +57,12 @@ const DURATION: Record<ToastTone, number> = {
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = React.useState<Toast[]>([]);
-  const [mounted, setMounted] = React.useState(false);
   const nextId = React.useRef(0);
 
-  React.useEffect(() => setMounted(true), []);
+  // `createPortal` needs a real `document.body`, which does not exist during
+  // SSR. Gating on a hydration flag rather than `typeof document` keeps the
+  // server render and the first client render identical.
+  const isHydrated = useIsHydrated();
 
   const dismiss = React.useCallback((id: number) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -94,7 +97,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      {mounted
+      {isHydrated
         ? createPortal(<ToastStack toasts={toasts} onDismiss={dismiss} />, document.body)
         : null}
     </ToastContext.Provider>

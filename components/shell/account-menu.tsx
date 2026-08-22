@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
+import { useMediaQuery } from "@/lib/hooks/browser";
 import { Sheet } from "@/components/ui/sheet";
 import { signOut } from "@/lib/auth/client";
 import type { Navigation } from "@/lib/navigation/navigation";
@@ -45,21 +46,13 @@ export function AccountMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [isSigningOut, setSigningOut] = useState(false);
-  const [isDesktop, setIsDesktop] = useState(false);
   const router = useRouter();
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Matches Tailwind's `md`. Read on mount and kept in sync, so rotating a
-  // tablet mid-session swaps the presentation rather than leaving a dropdown
-  // stranded at phone width.
-  useEffect(() => {
-    const query = window.matchMedia("(min-width: 768px)");
-    setIsDesktop(query.matches);
-
-    const onChange = (event: MediaQueryListEvent) => setIsDesktop(event.matches);
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
-  }, []);
+  // Matches Tailwind's `md`, and stays subscribed, so rotating a tablet
+  // mid-session swaps the presentation rather than leaving a dropdown stranded
+  // at phone width.
+  const isDesktop = useMediaQuery("(min-width: 768px)");
 
   // Outside-click and Escape for the *desktop dropdown only*. The mobile sheet
   // owns its own dismissal; wiring both would close the sheet twice.
