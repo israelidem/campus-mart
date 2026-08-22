@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Bricolage_Grotesque, DM_Mono, Karla } from "next/font/google";
 
+import { ToastProvider } from "@/components/ui/toast";
+
 import "./globals.css";
 
 /*
@@ -32,11 +34,11 @@ const mono = DM_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "Campus Mart",
+    default: "Campus Mart — Everything your campus needs, delivered",
     template: "%s · Campus Mart",
   },
   description:
-    "Campus Mart is a campus marketplace: order from approved vendors on your campus and have it delivered by verified student agents.",
+    "Order from verified vendors on your campus and have it brought to your hostel by a student delivery agent. Pay on delivery with a code only you have.",
   applicationName: "Campus Mart",
   appleWebApp: {
     capable: true,
@@ -49,21 +51,37 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 5,
-  themeColor: "#0f7a4d",
+  // Was `maximumScale: 5`. Pinch-zoom is an accessibility requirement, and
+  // capping it is the kind of thing that quietly fails an audit; `viewportFit`
+  // is what lets `env(safe-area-inset-*)` return anything but zero, which the
+  // bottom navigation and sheets depend on.
+  viewportFit: "cover",
+  themeColor: "#0b3d2c",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{ children: React.ReactNode }>) {
+/**
+ * The root layout deliberately does **not** constrain width.
+ *
+ * It used to wrap every page in `max-w-screen-lg`, which meant no screen could
+ * ever be full-bleed: the landing hero could not reach the edges, sticky bars
+ * were inset from the viewport, and the marketplace could not run a
+ * scroll-to-edge product rail. Width is now each route group's decision —
+ * `(app)` applies a content column, the landing page manages its own sections.
+ */
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body
-        className={`${display.variable} ${body.variable} ${mono.variable} antialiased`}
-      >
-        <div className="mx-auto flex min-h-dvh w-full max-w-screen-sm flex-col sm:max-w-screen-md lg:max-w-screen-lg">
-          {children}
-        </div>
+      <body className={`${display.variable} ${body.variable} ${mono.variable} antialiased`}>
+        {/* Keyboard users land here first; without it, reaching the main content
+            of the marketplace means tabbing through every category chip. */}
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[70] focus:rounded-control focus:bg-ink focus:px-4 focus:py-2.5 focus:text-sm focus:font-medium focus:text-white"
+        >
+          Skip to content
+        </a>
+
+        <ToastProvider>{children}</ToastProvider>
       </body>
     </html>
   );

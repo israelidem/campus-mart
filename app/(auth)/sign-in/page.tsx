@@ -1,113 +1,190 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Field, Input } from "@/components/ui/field";
+import { Field, Input, PasswordInput } from "@/components/ui/field";
+import { Notice } from "@/components/ui/state";
 import { signIn } from "@/lib/auth/client";
 
 /**
- * Maps a Better Auth error code to something a student can act on.
+ * Sign in.
  *
- * `INVALID_ORIGIN` means this deployment's `BETTER_AUTH_URL` does not match the
- * host it is served from — no password will ever work until that is fixed, so
- * say so rather than blaming the credentials.
+ * The error mapping is the substance of this screen. Better Auth answers with a
+ * code, and §14 requires that each one becomes a sentence a student can act on.
+ * Two cases matter more than the rest:
+ *
+ *  • `EMAIL_NOT_VERIFIED` is recoverable, so it gets a link to the verification
+ *    screen rather than a dead end.
+ *  • `INVALID_ORIGIN` is a deployment fault — `BETTER_AUTH_URL` does not match
+ *    the host — and no password will ever work until it is fixed. Reporting it
+ *    as "wrong credentials" would send a student to reset a password that was
+ *    never wrong, so it is named as a site problem.
+ *
+ * A network failure is caught separately: `signIn.email` rejects rather than
+ * returning an error object when the request never arrives, and an unhandled
+ * rejection here is exactly the "did the button work?" silence §14 forbids.
  */
-function describeSignInError(code: string | undefined): string {
+
+type SignInError = { message: string; recoverable?: "verify" | "reset" };
+
+function describeSignInError(code: string | undefined): SignInError {
   switch (code) {
     case "EMAIL_NOT_VERIFIED":
-      return "Confirm your email address before signing in.";
-    case "INVALID_ORIGIN":
-      return "This site is misconfigured and cannot sign you in. Please contact support.";
+      return {
+        message: "Your email address has not been confirmed yet.",
+        recoverable: "verify",
+      };
+    case "INVALID_EMAIL_OR_PASSWORD":
+    case "INVALID_PASSWORD":
+    case "INVALID_EMAIL":
+      return {
+        message: "That email and password combination is not correct.",
+        recoverable: "reset",
+      };
+    case "USER_NOT_FOUND":
+      // Deliberately the same sentence as a wrong password: confirming that an
+      // address does have an account is an account-enumeration leak.
+      return {
+        message: "That email and password combination is not correct.",
+        recoverable: "reset",
+      };
     case "TOO_MANY_REQUESTS":
-      return "Too many attempts. Wait a minute and try again.";
+      return { message: "Too many attempts. Wait a minute and try again." };
+    case "INVALID_ORIGIN":
+      return {
+        message:
+          "This site is not configured correctly and cannot sign you in. Please report this to support — it is not a problem with your password.",
+      };
     default:
-      return "Those credentials are not correct.";
+      return { message: "That email and password combination is not correct.", recoverable: "reset" };
   }
 }
 
-/** Email + password sign-in. Sessions are issued and validated by Better Auth. */
-
 export default function SignInPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [form, setForm] = useState({ email: "", password: "" });
-  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<SignInError | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // Set when a protected page bounced the visitor here, so the reason for
+  // landing on a sign-in form is stated rather than left to be guessed.
+  const reason = searchParams.get("reason");
 
   const update = (key: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement>) =>
     setForm((current) => ({ ...current, [key]: event.target.value }));
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
+    if (submitting) return; // Guards a double-tap on a slow connection.
+
     setSubmitting(true);
-    setMessage(null);
+    setError(null);
 
-    const result = await signIn.email({ email: form.email, password: form.password });
+    try {
+      const result = await signIn.email({
+        email: form.email.trim(),
+        password: form.password,
+      });
 
-    if (result.error) {
-      // Branch on the error code, never the status: Better Auth also answers 403
-      // for an untrusted origin, which is a deployment fault, not a user one.
-      setMessage(describeSignInError(result.error.code));
+      if (result.error) {
+        // Branch on the code, never the status: Better Auth also answers 403 for
+        // an untrusted origin, which is a deployment fault, not a user one.
+        setError(describeSignInError(result.error.code));
+        setSubmitting(false);
+        return;
+      }
+
+      // The server decides where each role belongs; this route redirects onward.
+      // `submitting` is intentionally left true so the button stays disabled
+      // through the navigation instead of flicking back to "Sign in".
+      router.push("/after-sign-in");
+    } catch {
+      setError({
+        message: "We could not reach Campus Mart. Check your connection and try again.",
+      });
       setSubmitting(false);
-      return;
     }
-
-
-    // The server decides where each role belongs; this route redirects onward.
-    router.push("/after-sign-in");
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Sign in</CardTitle>
-        <CardDescription>Welcome back to Campus Mart.</CardDescription>
-      </CardHeader>
+    <div>
+      <h1 className="font-display text-[1.75rem] font-semibold tracking-[-0.015em] text-ink">
+        Welcome back
+      </h1>
+      <p className="mt-2 text-[0.9375rem] text-ink-2">
+        Sign in to shop your campus marketplace.
+      </p>
 
-      <CardContent>
-        <form className="space-y-4" onSubmit={onSubmit} noValidate>
-          <Field id="email" label="Email address">
-            <Input
-              type="email"
-              value={form.email}
-              onChange={update("email")}
-              autoComplete="email"
-              inputMode="email"
-              required
-            />
-          </Field>
+      {reason === "session-expired" ? (
+        <Notice tone="info" className="mt-5" title="Your session ended">
+          Sign in again to pick up where you left off.
+        </Notice>
+      ) : null}
 
-          <Field id="password" label="Password">
-            <Input
-              type="password"
-              value={form.password}
-              onChange={update("password")}
-              autoComplete="current-password"
-              required
-            />
-          </Field>
+      <form className="mt-7 space-y-4" onSubmit={onSubmit} noValidate>
+        <Field id="email" label="Email address">
+          <Input
+            type="email"
+            value={form.email}
+            onChange={update("email")}
+            autoComplete="email"
+            inputMode="email"
+            autoCapitalize="none"
+            spellCheck={false}
+            placeholder="you@example.com"
+            required
+          />
+        </Field>
 
-          {message ? (
-            <p role="alert" className="text-sm text-red-600">
-              {message}
-            </p>
-          ) : null}
+        <Field id="password" label="Password">
+          <PasswordInput
+            value={form.password}
+            onChange={update("password")}
+            autoComplete="current-password"
+            placeholder="Your password"
+            required
+          />
+        </Field>
 
-          <Button type="submit" disabled={submitting} className="w-full">
-            {submitting ? "Signing in…" : "Sign in"}
-          </Button>
+        <div className="flex justify-end">
+          <Link
+            href="/verify-email"
+            className="text-sm font-medium text-brand-700 underline-offset-4 hover:underline"
+          >
+            Need to verify your email?
+          </Link>
+        </div>
 
-          <p className="text-sm opacity-70">
-            New to Campus Mart?{" "}
-            <Link className="underline" href="/sign-up">
-              Create an account
-            </Link>
-          </p>
-        </form>
-      </CardContent>
-    </Card>
+        {error ? (
+          <Notice tone="danger" title="Could not sign you in">
+            {error.message}
+            {error.recoverable === "verify" ? (
+              <>
+                {" "}
+                <Link href="/verify-email" className="font-medium underline underline-offset-4">
+                  Resend the verification email
+                </Link>
+                .
+              </>
+            ) : null}
+          </Notice>
+        ) : null}
+
+        <Button type="submit" block size="lg" isLoading={submitting} loadingLabel="Signing in…">
+          Sign in
+        </Button>
+      </form>
+
+      <p className="mt-6 text-center text-sm text-ink-2">
+        New to Campus Mart?{" "}
+        <Link href="/sign-up" className="font-medium text-brand-700 underline-offset-4 hover:underline">
+          Create an account
+        </Link>
+      </p>
+    </div>
   );
 }

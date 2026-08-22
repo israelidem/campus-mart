@@ -4,21 +4,33 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
+import { Sheet } from "@/components/ui/sheet";
 import { signOut } from "@/lib/auth/client";
 import type { Navigation } from "@/lib/navigation/navigation";
 import { cn } from "@/lib/utils";
 
 /**
- * The account menu: everything that is not a primary destination, plus sign-out.
+ * The account menu.
  *
- * Sign-out did not exist anywhere in the app before this. Twelve phases shipped
- * with no way to leave an account, which on a shared phone — the normal case on
- * campus — means the next person inherits the session. That is the reason this
- * component is a client component at all.
+ * The previous implementation was a single `absolute right-0 w-72` dropdown
+ * containing every navigation group, rendered identically at every width. On a
+ * 375px phone that is a panel taller than the viewport, anchored to the top-right
+ * corner, with its own inner scroll container fighting the page's — the exact
+ * failure in the screenshot referenced by §6.
  *
- * After signing out the router is refreshed as well as pushed. Every page here
- * reads the session on the server, so without `refresh()` the cached RSC payload
- * for the destination can still be the signed-in render.
+ * The fix is not to shrink it. A phone and a desktop want different objects:
+ *
+ *  • **Phone** → a bottom sheet. It is thumb-reachable, it is a familiar mobile
+ *    pattern, it can be dismissed by tapping away, and `Sheet` already handles
+ *    the scroll lock, focus trap, Escape key and `env(safe-area-inset-bottom)`
+ *    padding so content never sits under the home indicator.
+ *  • **Desktop** → a compact dropdown, anchored under the avatar, where a
+ *    pointer already is.
+ *
+ * Both render from the same `groups` data, so nothing can drift between them.
+ * The breakpoint is resolved with a media query rather than CSS visibility,
+ * because rendering both and hiding one would put two dialogs and two focus
+ * traps in the DOM at once.
  */
 export function AccountMenu({
   name,
@@ -33,13 +45,26 @@ export function AccountMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [isSigningOut, setSigningOut] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(false);
   const router = useRouter();
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Close on outside click and on Escape: a menu that traps the reader on a
-  // phone is worse than one that is slightly too eager to close.
+  // Matches Tailwind's `md`. Read on mount and kept in sync, so rotating a
+  // tablet mid-session swaps the presentation rather than leaving a dropdown
+  // stranded at phone width.
   useEffect(() => {
-    if (!open) return;
+    const query = window.matchMedia("(min-width: 768px)");
+    setIsDesktop(query.matches);
+
+    const onChange = (event: MediaQueryListEvent) => setIsDesktop(event.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+
+  // Outside-click and Escape for the *desktop dropdown only*. The mobile sheet
+  // owns its own dismissal; wiring both would close the sheet twice.
+  useEffect(() => {
+    if (!open || !isDesktop) return;
 
     function onPointerDown(event: PointerEvent) {
       if (!containerRef.current?.contains(event.target as Node)) setOpen(false);
@@ -54,7 +79,7 @@ export function AccountMenu({
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [open]);
+  }, [open, isDesktop]);
 
   async function handleSignOut() {
     setSigningOut(true);
@@ -71,6 +96,45 @@ export function AccountMenu({
 
   const initial = (name.trim()[0] ?? email[0] ?? "?").toUpperCase();
 
+  /** The identity block. Same content in both presentations. */
+  const identity = (
+    <div className="flex items-center gap-3">
+      <span className="flex size-11 shrink-0 items-center justify-center rounded-full bg-brand-100 font-display text-base font-semibold text-brand-800">
+        {initial}
+      </span>
+      <div className="min-w-0">
+        <p className="truncate text-[0.9375rem] font-semibold text-ink">{name}</p>
+        <p className="truncate text-xs text-ink-2">{email}</p>
+      </div>
+    </div>
+  );
+
+  const signOutButton = (
+    <button
+      type="button"
+      onClick={handleSignOut}
+      disabled={isSigningOut}
+      className={cn(
+        "flex min-h-[3rem] w-full items-center gap-2.5 rounded-control px-3 text-left",
+        "text-[0.9375rem] font-medium text-danger transition-colors",
+        "hover:bg-danger-soft disabled:opacity-60",
+      )}
+    >
+      {isSigningOut ? (
+        <span
+          aria-hidden="true"
+          className="size-4 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent"
+        />
+      ) : (
+        <svg aria-hidden="true" viewBox="0 0 20 20" className="size-[1.125rem] shrink-0" fill="none" stroke="currentColor" strokeWidth="1.7">
+          <path d="M12.5 6.5V4.8A1.3 1.3 0 0011.2 3.5H5.3A1.3 1.3 0 004 4.8v10.4a1.3 1.3 0 001.3 1.3h5.9a1.3 1.3 0 001.3-1.3v-1.7" strokeLinecap="round" />
+          <path d="M8 10h8m0 0l-2.3-2.3M16 10l-2.3 2.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+      {isSigningOut ? "Signing out…" : "Sign out"}
+    </button>
+  );
+
   return (
     <div ref={containerRef} className="relative">
       <button
@@ -81,32 +145,78 @@ export function AccountMenu({
         aria-label={`Account menu for ${name}`}
         className={cn(
           "flex size-10 items-center justify-center rounded-full border border-rule",
-          "bg-paper-2 font-display text-sm text-ink transition-colors hover:bg-brand-50",
+          "bg-surface font-display text-sm font-semibold text-ink transition-colors",
+          "hover:border-brand-300 hover:bg-brand-50",
+          open && "border-brand-300 bg-brand-50",
         )}
       >
         {initial}
       </button>
 
-      {open ? (
+      {/* ── Mobile: bottom sheet ─────────────────────────────────────────── */}
+      {!isDesktop ? (
+        <Sheet open={open} onClose={() => setOpen(false)} title="Account">
+          <div className="space-y-4">
+            <div className="rounded-card border border-rule bg-sunken/60 p-3">
+              {identity}
+              <p className="mt-2.5 border-t border-rule pt-2.5 text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                {roleLabel}
+              </p>
+            </div>
+
+            {groups.map((group) => (
+              <div key={group.title}>
+                <p className="px-3 pb-1 text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-ink-3">
+                  {group.title}
+                </p>
+                <div className="space-y-0.5">
+                  {group.items.map((item) => (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      onClick={() => setOpen(false)}
+                      // min-h keeps every row at a comfortable touch target even
+                      // when it has no hint line.
+                      className="flex min-h-[3rem] flex-col justify-center rounded-control px-3 py-2 transition-colors hover:bg-sunken"
+                    >
+                      <span className="text-[0.9375rem] font-medium text-ink">{item.label}</span>
+                      {item.hint ? (
+                        <span className="mt-0.5 text-xs text-ink-2">{item.hint}</span>
+                      ) : null}
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            ))}
+
+            <div className="border-t border-rule pt-3">{signOutButton}</div>
+          </div>
+        </Sheet>
+      ) : null}
+
+      {/* ── Desktop: anchored dropdown ───────────────────────────────────── */}
+      {isDesktop && open ? (
         <div
           role="menu"
           className={cn(
-            "absolute right-0 z-50 mt-2 w-72 origin-top-right overflow-hidden rounded-2xl",
-            "border border-rule bg-paper-2 shadow-lg",
+            "absolute right-0 z-50 mt-2 w-[17.5rem] origin-top-right overflow-hidden",
+            "rounded-sheet border border-rule bg-surface shadow-lift",
+            "animate-in",
           )}
         >
-          <div className="border-b border-rule px-4 py-3">
-            <p className="truncate font-display text-sm text-ink">{name}</p>
-            <p className="truncate text-xs text-ink-2">{email}</p>
-            <p className="mt-1 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-2">
+          <div className="border-b border-rule p-3">
+            {identity}
+            <p className="mt-2.5 text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-ink-3">
               {roleLabel}
             </p>
           </div>
 
-          <div className="max-h-[60vh] overflow-y-auto">
+          {/* Capped and scrollable. On a laptop the viewport is short, and an
+              admin has enough destinations to overflow it. */}
+          <div className="max-h-[min(28rem,60vh)] overflow-y-auto overscroll-contain p-1.5">
             {groups.map((group) => (
-              <div key={group.title} className="border-b border-rule py-2 last:border-b-0">
-                <p className="px-4 pb-1 font-mono text-[10px] uppercase tracking-[0.16em] text-ink-2">
+              <div key={group.title} className="mb-1 last:mb-0">
+                <p className="px-2.5 pb-0.5 pt-1.5 text-[0.6875rem] font-semibold uppercase tracking-[0.08em] text-ink-3">
                   {group.title}
                 </p>
                 {group.items.map((item) => (
@@ -115,9 +225,9 @@ export function AccountMenu({
                     href={item.href}
                     role="menuitem"
                     onClick={() => setOpen(false)}
-                    className="block px-4 py-2 hover:bg-brand-50"
+                    className="block rounded-lg px-2.5 py-2 transition-colors hover:bg-sunken"
                   >
-                    <span className="block text-sm text-ink">{item.label}</span>
+                    <span className="block text-sm font-medium text-ink">{item.label}</span>
                     {item.hint ? (
                       <span className="block text-xs text-ink-2">{item.hint}</span>
                     ) : null}
@@ -127,18 +237,7 @@ export function AccountMenu({
             ))}
           </div>
 
-          <button
-            type="button"
-            role="menuitem"
-            onClick={handleSignOut}
-            disabled={isSigningOut}
-            className={cn(
-              "w-full border-t border-rule px-4 py-3 text-left text-sm",
-              "text-stamp hover:bg-brand-50 disabled:opacity-60",
-            )}
-          >
-            {isSigningOut ? "Signing out…" : "Sign out"}
-          </button>
+          <div className="border-t border-rule p-1.5">{signOutButton}</div>
         </div>
       ) : null}
     </div>

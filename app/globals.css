@@ -1,85 +1,326 @@
 @import "tailwindcss";
 
 /*
- * Campus Mart base design tokens.
- * Mobile-first: type scale and spacing are tuned for small screens, and the
- * layout is capped so the PWA feels app-like on phones.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * CAMPUS MART DESIGN TOKENS
+ * ─────────────────────────────────────────────────────────────────────────────
  *
- * The visual language comes from the thing the product actually produces: a
- * delivery docket. Printed-receipt greys, stamped ink, mono digits for anything
- * the server decided (price, fee, OTP, deadline).
+ * One source of truth for colour, type, radius and elevation. Screens were
+ * previously built one at a time, each inventing its own greys and its own
+ * corner radius, and several used utility names (`text-muted-foreground`,
+ * `bg-primary`, `text-destructive`) that were never defined in the theme — so
+ * they rendered as nothing at all. Every token those screens reach for is now
+ * defined here, which is why old and new names coexist below.
+ *
+ * The palette: deep campus green, near-black ink, warm cream paper. Light only
+ * — a half-finished dark mode was producing white-on-white cards, and one
+ * confident theme beats two unfinished ones.
  */
 @theme {
-  --color-brand-50: oklch(0.97 0.02 150);
-  --color-brand-100: oklch(0.94 0.05 150);
-  --color-brand-200: oklch(0.88 0.09 150);
-  --color-brand-300: oklch(0.8 0.13 150);
-  --color-brand-400: oklch(0.72 0.16 150);
-  --color-brand-500: oklch(0.63 0.17 150);
-  --color-brand-600: oklch(0.54 0.15 150);
-  --color-brand-700: oklch(0.44 0.12 150);
-  --color-brand-800: oklch(0.35 0.09 150);
-  --color-brand-900: oklch(0.27 0.06 150);
+  /* ── Brand green ─────────────────────────────────────────────────────────
+     Anchored at 600 for actions. Cool enough to sit on cream without turning
+     olive, dark enough to carry white text at AA. */
+  --color-brand-50: oklch(0.973 0.021 155);
+  --color-brand-100: oklch(0.94 0.045 155);
+  --color-brand-200: oklch(0.885 0.078 155);
+  --color-brand-300: oklch(0.81 0.112 155);
+  --color-brand-400: oklch(0.715 0.14 155);
+  --color-brand-500: oklch(0.62 0.148 156);
+  --color-brand-600: oklch(0.523 0.132 157);
+  --color-brand-700: oklch(0.436 0.108 157);
+  --color-brand-800: oklch(0.356 0.084 158);
+  --color-brand-900: oklch(0.283 0.062 158);
+  --color-brand-950: oklch(0.196 0.044 158);
 
-  /* Docket palette. Paper is cool, not cream; ink is a green-black so it sits
-     with the brand green; stamp red is only ever used for a stamped mark. */
-  --color-paper: oklch(0.97 0.006 140);
-  --color-paper-2: oklch(0.99 0.004 140);
-  --color-ink: oklch(0.23 0.03 160);
-  --color-ink-2: oklch(0.31 0.03 160);
-  --color-stamp: oklch(0.52 0.19 30);
-  --color-rule: oklch(0.87 0.01 150);
+  /* ── Semantic surfaces ────────────────────────────────────────────────────
+     `paper` is the page, `surface` is a card on it, `raised` is a card that
+     needs to float (sheets, menus, sticky bars). Three steps, no more. */
+  --color-paper: oklch(0.982 0.008 95);
+  --color-paper-2: oklch(1 0 0);
+  --color-surface: oklch(1 0 0);
+  --color-raised: oklch(1 0 0);
+  --color-sunken: oklch(0.962 0.008 95);
 
+  /* ── Ink ──────────────────────────────────────────────────────────────────
+     `ink` for anything you must read, `ink-2` for supporting text, `ink-3`
+     for labels and metadata. Nothing lighter than ink-3 carries meaning. */
+  --color-ink: oklch(0.235 0.018 160);
+  --color-ink-2: oklch(0.45 0.014 160);
+  --color-ink-3: oklch(0.585 0.012 160);
+
+  /* ── Lines ────────────────────────────────────────────────────────────────*/
+  --color-rule: oklch(0.905 0.008 150);
+  --color-rule-2: oklch(0.845 0.01 150);
+
+  /* ── Status ───────────────────────────────────────────────────────────────
+     Each has a solid (text/icon) and a soft (background) so a badge never has
+     to invent an opacity. */
+  --color-success: oklch(0.52 0.125 158);
+  --color-success-soft: oklch(0.955 0.04 158);
+  --color-warning: oklch(0.55 0.13 75);
+  --color-warning-soft: oklch(0.965 0.045 85);
+  --color-danger: oklch(0.53 0.18 27);
+  --color-danger-soft: oklch(0.962 0.03 27);
+  --color-info: oklch(0.52 0.13 245);
+  --color-info-soft: oklch(0.96 0.03 245);
+
+  /* Kept because existing screens print a "stamped" mark with it. */
+  --color-stamp: oklch(0.53 0.18 27);
+
+  /* ── Aliases for shadcn-style names already used across the codebase ──────
+     These were undefined before, so the components using them had no colour
+     at all. Mapped onto the tokens above rather than deleted, so the fix
+     reaches every screen at once. */
+  --color-primary: var(--color-brand-600);
+  --color-primary-foreground: oklch(0.99 0.004 155);
+  --color-secondary: var(--color-brand-50);
+  --color-secondary-foreground: var(--color-brand-900);
+  --color-background: var(--color-paper);
+  --color-foreground: var(--color-ink);
+  --color-muted: var(--color-sunken);
+  --color-muted-foreground: var(--color-ink-2);
+  --color-border: var(--color-rule);
+  --color-input: var(--color-rule-2);
+  --color-destructive: var(--color-danger);
+  --color-destructive-foreground: oklch(0.99 0.004 27);
+  --color-accent: var(--color-brand-50);
+  --color-accent-foreground: var(--color-brand-900);
+  --color-ring: var(--color-brand-500);
+
+  /* ── Type ─────────────────────────────────────────────────────────────────
+     display: headlines. sans: everything read as prose or a control.
+     mono: anything the server decided — money, codes, deadlines, references. */
   --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
   --font-sans:
     var(--font-karla), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   --font-mono: var(--font-dm-mono), ui-monospace, "SFMono-Regular", Menlo, monospace;
-}
 
-:root {
-  --background: oklch(0.99 0.005 150);
-  --foreground: oklch(0.2 0.02 150);
-  --muted: oklch(0.96 0.008 150);
-  --muted-foreground: oklch(0.5 0.02 150);
-  --border: oklch(0.9 0.01 150);
-  --danger: oklch(0.58 0.2 25);
-}
+  /* ── Radius ───────────────────────────────────────────────────────────────
+     Restrained on purpose. Controls 10px, cards 14px, sheets 20px. Pills are
+     reserved for chips and avatars, so a pill always means "filter or person",
+     never "button". */
+  --radius-control: 0.625rem;
+  --radius-card: 0.875rem;
+  --radius-sheet: 1.25rem;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: oklch(0.17 0.02 150);
-    --foreground: oklch(0.97 0.005 150);
-    --muted: oklch(0.24 0.02 150);
-    --muted-foreground: oklch(0.7 0.02 150);
-    --border: oklch(0.32 0.02 150);
-  }
-}
+  /* ── Elevation ────────────────────────────────────────────────────────────
+     Two shadows. `soft` lifts a card off the paper; `pop` is only for things
+     that overlay the page. Anything more starts to look like a toy. */
+  --shadow-soft: 0 1px 2px oklch(0.24 0.02 160 / 0.05), 0 1px 3px oklch(0.24 0.02 160 / 0.04);
+  --shadow-pop: 0 8px 24px -8px oklch(0.24 0.02 160 / 0.18), 0 2px 8px -2px oklch(0.24 0.02 160 / 0.08);
 
-html {
-  -webkit-tap-highlight-color: transparent;
-}
-
-body {
-  background-color: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-sans);
-  /* Respect iOS safe areas when installed as a PWA. */
-  padding-bottom: env(safe-area-inset-bottom);
-  min-height: 100dvh;
-}
-
-/* Visible focus for keyboard users (accessibility baseline). */
-:focus-visible {
-  outline: 2px solid var(--color-brand-500);
-  outline-offset: 2px;
+  /* Motion: one duration for state, one for entrances. */
+  --ease-out-soft: cubic-bezier(0.22, 0.9, 0.35, 1);
 }
 
 /*
- * Docket primitives, used by the landing page.
- * A row rule is a printed perforation, not a border: dashes that read as a
- * tear-off line on a receipt.
+ * `100dvh` on the html element as well as the body: without it, iOS Safari
+ * measures the bottom navigation against the wrong viewport and the last row
+ * of thumb targets sits under the home indicator.
  */
+html {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  /* The single most common cause of the sideways-drift bug: one over-wide child
+     used to make the whole document scrollable horizontally. */
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  min-height: 100dvh;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Headings default to the display face so no screen has to remember to ask. */
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+}
+
+/* Numbers the server decided read as data, not prose. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Accessibility baseline: a visible, consistent focus ring everywhere. */
+:focus-visible {
+  outline: 2px solid var(--color-brand-500);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Hide focus rings for pointer users on elements that manage their own. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+::selection {
+  background-color: var(--color-brand-200);
+}
+
+/* Native form controls inherit the type stack instead of the OS default. */
+input,
+select,
+textarea,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+/* iOS zooms any input under 16px on focus, which throws the layout sideways. */
+@supports (-webkit-touch-callout: none) {
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1em);
+  }
+}
+
+/* A horizontally scrolling row (categories, chips) should not show a bar. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Snap rows: category chips and vendor carousels stop where they should. */
+.snap-row {
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+}
+.snap-row > * {
+  scroll-snap-align: start;
+}
+
+/* Safe areas, named so screens stop hand-writing env() everywhere. */
+.pb-safe {
+  padding-bottom: max(env(safe-area-inset-bottom), 0px);
+}
+.pt-safe {
+  padding-top: max(env(safe-area-inset-top), 0px);
+}
+
+/* Clamp to two/three lines: product names must not push a card taller than
+   its neighbours in a grid. */
+.clamp-1,
+.clamp-2,
+.clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.clamp-1 {
+  -webkit-line-clamp: 1;
+}
+.clamp-2 {
+  -webkit-line-clamp: 2;
+}
+.clamp-3 {
+  -webkit-line-clamp: 3;
+}
+
+/* ── Motion ─────────────────────────────────────────────────────────────── */
+@keyframes cm-fade-up {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes cm-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes cm-sheet-up {
+  from {
+    translate: 0 100%;
+  }
+  to {
+    translate: 0 0;
+  }
+}
+
+@keyframes cm-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.animate-fade-up {
+  animation: cm-fade-up 380ms var(--ease-out-soft) both;
+}
+.animate-fade {
+  animation: cm-fade 220ms ease-out both;
+}
+.animate-sheet {
+  animation: cm-sheet-up 260ms var(--ease-out-soft) both;
+}
+
+/* Staggered entrance for a list; the delay is set per item with --line. */
+.animate-line {
+  animation: cm-fade-up 360ms var(--ease-out-soft) both;
+  animation-delay: calc(var(--line, 0) * 60ms);
+}
+
+/* Skeletons shimmer rather than pulse: a pulse reads as "broken", a sweep
+   reads as "loading". */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--color-sunken);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    transparent,
+    oklch(1 0 0 / 0.6),
+    transparent
+  );
+  animation: cm-shimmer 1.4s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .skeleton::after {
+    display: none;
+  }
+}
+
+/* ── Landing-page flourishes ─────────────────────────────────────────────── */
+
+/* A printed perforation, used on the example delivery docket. */
 .perforated {
   background-image: repeating-linear-gradient(
     to right,
@@ -97,68 +338,23 @@ body {
   content: "";
   position: absolute;
   top: 50%;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   border-radius: 9999px;
-  background-color: var(--color-ink);
+  background-color: var(--color-brand-950);
   translate: 0 -50%;
 }
-
 .notched::before {
-  left: -9px;
+  left: -8px;
 }
-
 .notched::after {
-  right: -9px;
+  right: -8px;
 }
 
-/* A stamped mark: ink pressed unevenly onto paper. */
-.stamped {
-  border: 2px solid var(--color-stamp);
-  color: var(--color-stamp);
-  rotate: -6deg;
-  opacity: 0.85;
-}
-
-/* Page-load sequence for the docket: the slip settles, then its lines print. */
-@keyframes docket-settle {
-  from {
-    opacity: 0;
-    translate: 0 14px;
-    rotate: 0deg;
-  }
-  to {
-    opacity: 1;
-    translate: 0 0;
-    rotate: -0.7deg;
-  }
-}
-
-@keyframes line-print {
-  from {
-    opacity: 0;
-    translate: 0 6px;
-  }
-  to {
-    opacity: 1;
-    translate: 0 0;
-  }
-}
-
-.animate-docket {
-  animation: docket-settle 620ms cubic-bezier(0.16, 0.84, 0.44, 1) both;
-}
-
-.animate-line {
-  animation: line-print 420ms ease-out both;
-  animation-delay: calc(var(--line, 0) * 90ms + 240ms);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    transition-duration: 0.01ms !important;
-  }
+/* A faint grid, so a large flat surface has some texture without a gradient. */
+.grid-texture {
+  background-image:
+    linear-gradient(to right, oklch(1 0 0 / 0.045) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(1 0 0 / 0.045) 1px, transparent 1px);
+  background-size: 28px 28px;
 }

@@ -80,3 +80,30 @@ const nairaFormatter = new Intl.NumberFormat("en-NG", {
 export function formatKobo(kobo: Kobo): string {
   return nairaFormatter.format(koboToNaira(kobo));
 }
+
+const compactNairaFormatter = new Intl.NumberFormat("en-NG", {
+  style: "currency",
+  currency: "NGN",
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
+});
+
+/**
+ * Display helper for prices in the shopping UI: 350000 -> "₦3,500".
+ *
+ * Separate from `formatKobo` rather than replacing it. Anything that has to
+ * reconcile — an invoice, a settlement figure, an earnings statement — must
+ * show the kobo, because a rounded total that disagrees with the sum of its
+ * lines destroys trust in the number. But a product card showing "₦3,500.00"
+ * reads like an accounting system, and every campus price is a whole naira.
+ *
+ * Falls back to the exact format when there genuinely are kobo, so this can
+ * never hide part of a price.
+ */
+export function formatPrice(kobo: Kobo): string {
+  assertKobo(kobo);
+  if (kobo % KOBO_PER_NAIRA !== 0) return formatKobo(kobo);
+  return compactNairaFormatter.format(koboToNaira(kobo));
+}
+
+
