@@ -24,7 +24,7 @@ import type { MarketplaceProduct } from "@/lib/products/marketplace-service";
  * stable tint from the product name, so the same product always gets the same
  * colour and a grid of image-less products still looks composed.
  */
-function ImageFallback({ label, className }: { label: string; className?: string }) {
+export function ImageFallback({ label, className }: { label: string; className?: string }) {
   const hue = React.useMemo(() => {
     let hash = 0;
     for (let i = 0; i < label.length; i++) hash = (hash * 31 + label.charCodeAt(i)) % 360;
@@ -52,7 +52,7 @@ function ImageFallback({ label, className }: { label: string; className?: string
   );
 }
 
-function productImageSrc(imageId: string | null): string | null {
+export function productImageSrc(imageId: string | null): string | null {
   // Images are served through the API so authorization and campus isolation
   // still apply to a direct image request.
   return imageId ? `/api/products/images/${imageId}` : null;

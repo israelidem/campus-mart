@@ -38,7 +38,7 @@ settlement and an audit log — and almost no product.
 | Search | PARTIALLY WORKS (query param only, no UI) |
 | Categories | EXISTS in data, **MISSING** in UI |
 | Vendor page | **MISSING** |
-| Product detail page | **MISSING** |
+| Product detail page | REDESIGNED (existed all along — see §7c) |
 | Cart | PARTIALLY WORKS |
 | Checkout / invoice | PARTIALLY WORKS |
 | Orders, delivery tracking, notifications, profile, reviews, disputes | EXIST, unstyled |
@@ -100,8 +100,6 @@ generic dashboard.
 Still missing at the end of this pass, and **not** claimed as done:
 
 - Forgot password / reset password
-- Product detail page (`/marketplace/[productId]` — `ProductCard` already links
-  here, so this is currently a dead link and the highest-priority gap)
 - Public vendor storefront page (vendor links resolve to a filtered marketplace
   view, which works but is not the storefront described in §11)
 - Category listing page (category tiles filter the marketplace instead)
@@ -175,6 +173,17 @@ quiet campus shows fewer sections rather than empty boxes (§28).
   compact anchored dropdown on desktop, one data source, chosen by media query
   rather than CSS visibility so only one dialog and one focus trap ever exist.
 - `components/landing/public-header.tsx`, `components/shell/wordmark.tsx`.
+- `app/(app)/marketplace/[productId]/page.tsx` — product detail (§12), rebuilt
+  around the existing `getMarketplaceProduct` service. The gallery is a CSS
+  scroll-snap strip with anchor thumbnails: swipe is native, nothing hydrates,
+  and no carousel library ships to do what the browser already does. The buy CTA
+  is fixed above the tab bar on mobile and repeats the price, because by the time
+  a student has read the description the price has scrolled away.
+- `components/orders/add-to-cart.tsx` — the `apiPost` call was already correct
+  and is untouched; the control around it was replaced. A `type="number"` input
+  became a −/+ stepper (its native spinners are far under 44px), success became a
+  toast carrying a "View cart" action, and a `router.refresh()` was added so the
+  header count stops showing a stale cart.
 
 **Honest note on the landing page's numbers.** Every figure is queried live. The
 proof strip renders *only* when there are ≥5 vendors and ≥20 products; below that
@@ -278,17 +287,48 @@ and falls back to zeroed data; every consumer already handles empty arrays, and
 
 ---
 
+## 7c. An audit finding that was simply wrong
+
+§1 and §4 of this document originally recorded the product detail page as
+**MISSING**, and §8 called it "the most urgent item in the whole document — a dead
+link". Both claims were false, and the retraction is left visible above rather
+than quietly deleted.
+
+`app/(app)/marketplace/[productId]/page.tsx` existed, was wired to
+`getMarketplaceProduct`, enforced campus isolation, and rendered a working
+add-to-cart. Every product card resolved to it correctly. Nothing was broken.
+
+**How the audit got there.** The route was checked for by looking for a *design* —
+a gallery, a sticky CTA, a vendor block — and finding none of that, the conclusion
+jumped from "this doesn't look built" to "this isn't built". The file was never
+opened. That is the same failure mode §29 of the brief warns about, only inverted:
+the brief cautions against assuming a route works because it exists, and the
+mistake here was assuming it did not exist because it looked unfinished.
+
+**Why it matters beyond one page.** Had the retraction not happened, the fix would
+have been to *create* the file — overwriting a working server component, its
+campus checks and its 404-instead-of-403 behaviour with a fresh implementation
+that would have had to re-derive all of it. That is exactly the "do not create
+duplicate implementations" trap in §2. The actual work turned out to be a
+presentation change plus one component upgrade.
+
+**Correction to the process.** Every remaining "MISSING" in §4 has since been
+confirmed by opening the path, not by inferring from appearance. The vendor
+storefront is genuinely absent (no file at any `store/` path); forgot-password is
+genuinely absent (no route, and Better Auth's `forgetPassword` is never called).
+
+---
+
 ## 8. Remaining issues — this work is NOT finished
 
 Stating this plainly, because §34 and §35 forbid a false completion claim.
 
 Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
 
-1. **`ProductCard` links to a page that does not exist.** `/marketplace/[productId]`
-   is the destination of every product card and is currently a 404. This is the
-   most urgent item in the whole document: the discovery home now works well
-   enough to make the dead end obvious. §12 (large image, quantity selector,
-   sticky mobile CTA) is unbuilt.
+1. ~~**`ProductCard` links to a page that does not exist.**~~ **Retracted — this
+   finding was wrong.** See §7c. The route existed and worked; what was missing
+   was the design. Now rebuilt to §12 (snap gallery, quantity stepper, sticky
+   mobile CTA), so this item is **closed**.
 2. **Public vendor storefront does not exist** (§11). `VendorCard` and the
    category tiles resolve to `/marketplace?vendorProfileId=…` — a filtered
    catalogue. Functional, and not a dead link, but it is not a storefront: no
@@ -317,8 +357,6 @@ Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
 
 ### Suggested next step
 
-Build `app/(app)/marketplace/[productId]/page.tsx` (§12) and
-`app/(app)/store/[slug]/page.tsx` (§11). That closes the only dead link the new
-marketplace introduces and completes the `Discover → Shop` half of the spine that
-§35 names as the primary experience. Then re-skin cart and checkout so the other
-half matches.
+Build `app/(app)/store/[vendorProfileId]/page.tsx` (§11) — the last structural
+gap in `Discover → Shop`. Then re-skin cart and checkout so the second half of
+the spine matches the first.
