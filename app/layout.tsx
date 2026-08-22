@@ -69,8 +69,11 @@ export const viewport: Viewport = {
  * `(app)` applies a content column, the landing page manages its own sections.
  */
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  // `data-scroll-behavior` acknowledges the `scroll-behavior: smooth` declared in
+  // globals.css. Without it Next.js logs a console warning on every route change,
+  // and §28 does not allow console noise during normal usage.
   return (
-    <html lang="en">
+    <html lang="en" data-scroll-behavior="smooth">
       <body className={`${display.variable} ${body.variable} ${mono.variable} antialiased`}>
         {/* Keyboard users land here first; without it, reaching the main content
             of the marketplace means tabbing through every category chip. */}

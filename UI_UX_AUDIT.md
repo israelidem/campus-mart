@@ -100,10 +100,12 @@ generic dashboard.
 Still missing at the end of this pass, and **not** claimed as done:
 
 - Forgot password / reset password
-- Product detail page
-- Public vendor storefront page
-- Student marketplace home (the `Good evening, Israel 👋` screen from §9)
-- Category listing page
+- Product detail page (`/marketplace/[productId]` — `ProductCard` already links
+  here, so this is currently a dead link and the highest-priority gap)
+- Public vendor storefront page (vendor links resolve to a filtered marketplace
+  view, which works but is not the storefront described in §11)
+- Category listing page (category tiles filter the marketplace instead)
+
 
 ---
 
@@ -152,9 +154,15 @@ Escape, safe-area padding), `toast.tsx`, `state.tsx` (`EmptyState`, `ErrorState`
 `GateState`, `Notice`, content-shaped skeletons).
 
 **Marketplace:** `components/marketplace/cards.tsx` — `ProductCard`,
-`VendorCard`, `CategoryChip`, bound to the **real** service types from
+`VendorCard`, `CategoryTile`, bound to the **real** service types from
 `lib/products/marketplace-service.ts`, with fixed aspect ratios so a grid never
 jumps as images load.
+
+`components/marketplace/discovery-home.tsx` — the §9 discovery home. Built as
+horizontally-scrolling rails rather than a grid: a rail says "there is more where
+this came from" in one row of vertical space, where a 12-item grid on a 375px
+screen says nothing and costs six. Every section is guarded on `length`, so a
+quiet campus shows fewer sections rather than empty boxes (§28).
 
 **Screens:**
 - `app/page.tsx` — the landing page, built from scratch. Hero, an order-sequence
@@ -202,35 +210,43 @@ not rewritten.
 
 Stating this plainly, because §34 and §35 forbid a false completion claim.
 
-**Priority 3 onward is largely outstanding.**
+Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
 
-1. **Student marketplace home is not built.** The §9 screen — greeting, search,
-   delivery address, category rail, "popular near you" — does not exist. This is
-   the single most important remaining screen: it is what makes the product a
-   marketplace rather than a dashboard.
-2. **Product detail page and public vendor storefront do not exist** (§11, §12).
-   `ProductCard` and `VendorCard` are ready for them.
+1. **`ProductCard` links to a page that does not exist.** `/marketplace/[productId]`
+   is the destination of every product card and is currently a 404. This is the
+   most urgent item in the whole document: the discovery home now works well
+   enough to make the dead end obvious. §12 (large image, quantity selector,
+   sticky mobile CTA) is unbuilt.
+2. **Public vendor storefront does not exist** (§11). `VendorCard` and the
+   category tiles resolve to `/marketplace?vendorProfileId=…` — a filtered
+   catalogue. Functional, and not a dead link, but it is not a storefront: no
+   store header, rating, opening status or delivery estimate.
 3. **Sign-up is still a single-page form.** The four-step flow in §13 is not built.
 4. **Forgot-password does not exist.** The sign-in page currently links to email
    verification instead, which is honest but incomplete.
 5. **Onboarding completion screen** (§15, "You're almost there") is not built.
-6. **Vendor, agent, admin and super-admin screens have not been re-skinned.** They
-   now inherit the new tokens through the primitives, so they are no longer
-   actively broken-looking, but none has had a deliberate pass. The
+6. **Cart, checkout, invoice, orders and delivery tracking have not been
+   re-skinned.** They inherit the tokens through the primitives, so they are no
+   longer actively broken-looking, but the `Discover → Shop → Checkout → Receive`
+   spine is only styled through its first two steps.
+7. **Vendor, agent, admin and super-admin screens have not been re-skinned.** The
    delivery-agent workflow (§18) in particular still needs to become a guided
    sequence rather than a dashboard.
-7. **Bottom navigation is text-only.** It works and fits 320px, but §16 implies
-   icons; the items also need a `Cart` affordance.
-8. **Responsive QA (§25) was reasoned about, not measured.** Layouts were built
-   mobile-first with `min-w-0`/`truncate` guards, but no screen has been opened at
-   320/375/390/430px in a browser. This must be done before launch.
-9. **Seed data (§27).** `prisma/seed.ts` exists but has not been verified to
-   produce a marketplace rich enough to evaluate the UI against.
+8. **Bottom navigation is text-only.** It works and fits 320px, but §16 implies
+   icons, and it has no cart affordance.
+9. **Responsive QA (§25) was reasoned about, not measured.** Layouts were built
+   mobile-first with `min-w-0`/`truncate` guards and the routes were confirmed to
+   render (`/` → 200, `/sign-in` → 200, `/marketplace` → 307 for anonymous
+   visitors), but no screen has been *visually inspected* at 320/375/390/430px.
+   This must happen before launch.
+10. **Seed data (§27).** `prisma/seed.ts` exists but has not been verified to
+    produce a marketplace rich enough to evaluate the UI against. Until it is, the
+    discovery home will mostly render its empty state on a local database.
 
 ### Suggested next step
 
-Build the student marketplace home (`app/(app)/student/page.tsx`) against
-`lib/products/marketplace-service.ts` using the existing `ProductCard` /
-`VendorCard` / `CategoryChip`, then the product detail and vendor storefront
-pages. That completes the `Discover → Shop → Checkout` spine that §35 names as
-the primary experience.
+Build `app/(app)/marketplace/[productId]/page.tsx` (§12) and
+`app/(app)/store/[slug]/page.tsx` (§11). That closes the only dead link the new
+marketplace introduces and completes the `Discover → Shop` half of the spine that
+§35 names as the primary experience. Then re-skin cart and checkout so the other
+half matches.
