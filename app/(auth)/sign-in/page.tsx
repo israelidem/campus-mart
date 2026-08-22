@@ -1,115 +1,28 @@
-"use client";
+import { Suspense } from "react";
+import type { Metadata } from "next";
 
-import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { SignInForm, SignInReasonNotice } from "@/components/auth/sign-in-form";
 
-import { Button } from "@/components/ui/button";
-import { Field, Input, PasswordInput } from "@/components/ui/field";
-import { Notice } from "@/components/ui/state";
-import { signIn } from "@/lib/auth/client";
+export const metadata: Metadata = {
+  title: "Sign in",
+  description: "Sign in to shop your campus marketplace.",
+};
 
 /**
  * Sign in.
  *
- * The error mapping is the substance of this screen. Better Auth answers with a
- * code, and §14 requires that each one becomes a sentence a student can act on.
- * Two cases matter more than the rest:
+ * A server component so the shell prerenders. The interactive parts live in
+ * `components/auth/sign-in-form.tsx`, and the one piece that reads the query
+ * string (`?reason=session-expired`) is wrapped in Suspense on its own.
  *
- *  • `EMAIL_NOT_VERIFIED` is recoverable, so it gets a link to the verification
- *    screen rather than a dead end.
- *  • `INVALID_ORIGIN` is a deployment fault — `BETTER_AUTH_URL` does not match
- *    the host — and no password will ever work until it is fixed. Reporting it
- *    as "wrong credentials" would send a student to reset a password that was
- *    never wrong, so it is named as a site problem.
- *
- * A network failure is caught separately: `signIn.email` rejects rather than
- * returning an error object when the request never arrives, and an unhandled
- * rejection here is exactly the "did the button work?" silence §14 forbids.
+ * Without that boundary `next build` fails with a prerender error on this route:
+ * `useSearchParams` cannot be resolved at build time, and Next treats that as
+ * fatal during export rather than degrading to a runtime render. The boundary is
+ * scoped to the notice alone so the form itself is still server-rendered HTML —
+ * suspending the whole page would mean shipping a blank panel to every visitor
+ * for the sake of a banner that almost none of them will see.
  */
-
-type SignInError = { message: string; recoverable?: "verify" | "reset" };
-
-function describeSignInError(code: string | undefined): SignInError {
-  switch (code) {
-    case "EMAIL_NOT_VERIFIED":
-      return {
-        message: "Your email address has not been confirmed yet.",
-        recoverable: "verify",
-      };
-    case "INVALID_EMAIL_OR_PASSWORD":
-    case "INVALID_PASSWORD":
-    case "INVALID_EMAIL":
-      return {
-        message: "That email and password combination is not correct.",
-        recoverable: "reset",
-      };
-    case "USER_NOT_FOUND":
-      // Deliberately the same sentence as a wrong password: confirming that an
-      // address does have an account is an account-enumeration leak.
-      return {
-        message: "That email and password combination is not correct.",
-        recoverable: "reset",
-      };
-    case "TOO_MANY_REQUESTS":
-      return { message: "Too many attempts. Wait a minute and try again." };
-    case "INVALID_ORIGIN":
-      return {
-        message:
-          "This site is not configured correctly and cannot sign you in. Please report this to support — it is not a problem with your password.",
-      };
-    default:
-      return { message: "That email and password combination is not correct.", recoverable: "reset" };
-  }
-}
-
 export default function SignInPage() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [form, setForm] = useState({ email: "", password: "" });
-  const [error, setError] = useState<SignInError | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  // Set when a protected page bounced the visitor here, so the reason for
-  // landing on a sign-in form is stated rather than left to be guessed.
-  const reason = searchParams.get("reason");
-
-  const update = (key: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement>) =>
-    setForm((current) => ({ ...current, [key]: event.target.value }));
-
-  async function onSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    if (submitting) return; // Guards a double-tap on a slow connection.
-
-    setSubmitting(true);
-    setError(null);
-
-    try {
-      const result = await signIn.email({
-        email: form.email.trim(),
-        password: form.password,
-      });
-
-      if (result.error) {
-        // Branch on the code, never the status: Better Auth also answers 403 for
-        // an untrusted origin, which is a deployment fault, not a user one.
-        setError(describeSignInError(result.error.code));
-        setSubmitting(false);
-        return;
-      }
-
-      // The server decides where each role belongs; this route redirects onward.
-      // `submitting` is intentionally left true so the button stays disabled
-      // through the navigation instead of flicking back to "Sign in".
-      router.push("/after-sign-in");
-    } catch {
-      setError({
-        message: "We could not reach Campus Mart. Check your connection and try again.",
-      });
-      setSubmitting(false);
-    }
-  }
-
   return (
     <div>
       <h1 className="font-display text-[1.75rem] font-semibold tracking-[-0.015em] text-ink">
@@ -119,72 +32,13 @@ export default function SignInPage() {
         Sign in to shop your campus marketplace.
       </p>
 
-      {reason === "session-expired" ? (
-        <Notice tone="info" className="mt-5" title="Your session ended">
-          Sign in again to pick up where you left off.
-        </Notice>
-      ) : null}
+      {/* No fallback: this is a conditional banner, and a placeholder would push
+          the form down and then snap it back on hydration. */}
+      <Suspense fallback={null}>
+        <SignInReasonNotice />
+      </Suspense>
 
-      <form className="mt-7 space-y-4" onSubmit={onSubmit} noValidate>
-        <Field id="email" label="Email address">
-          <Input
-            type="email"
-            value={form.email}
-            onChange={update("email")}
-            autoComplete="email"
-            inputMode="email"
-            autoCapitalize="none"
-            spellCheck={false}
-            placeholder="you@example.com"
-            required
-          />
-        </Field>
-
-        <Field id="password" label="Password">
-          <PasswordInput
-            value={form.password}
-            onChange={update("password")}
-            autoComplete="current-password"
-            placeholder="Your password"
-            required
-          />
-        </Field>
-
-        <div className="flex justify-end">
-          <Link
-            href="/verify-email"
-            className="text-sm font-medium text-brand-700 underline-offset-4 hover:underline"
-          >
-            Need to verify your email?
-          </Link>
-        </div>
-
-        {error ? (
-          <Notice tone="danger" title="Could not sign you in">
-            {error.message}
-            {error.recoverable === "verify" ? (
-              <>
-                {" "}
-                <Link href="/verify-email" className="font-medium underline underline-offset-4">
-                  Resend the verification email
-                </Link>
-                .
-              </>
-            ) : null}
-          </Notice>
-        ) : null}
-
-        <Button type="submit" block size="lg" isLoading={submitting} loadingLabel="Signing in…">
-          Sign in
-        </Button>
-      </form>
-
-      <p className="mt-6 text-center text-sm text-ink-2">
-        New to Campus Mart?{" "}
-        <Link href="/sign-up" className="font-medium text-brand-700 underline-offset-4 hover:underline">
-          Create an account
-        </Link>
-      </p>
+      <SignInForm />
     </div>
   );
 }

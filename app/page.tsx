@@ -37,35 +37,58 @@ type LandingData = {
   counts: { vendors: number; products: number; campuses: number };
 };
 
+/** What the page falls back to when the database cannot be reached. */
+const EMPTY_LANDING: LandingData = {
+  campuses: [],
+  categories: [],
+  counts: { vendors: 0, products: 0, campuses: 0 },
+};
+
 async function getLandingData(): Promise<LandingData> {
   // Everything here is public, aggregate and campus-agnostic: names of active
   // campuses, distinct category names, and counts. No vendor, student or order
   // detail is exposed, so there is no isolation boundary to cross.
-  const [campuses, categories, vendors, products] = await Promise.all([
-    prisma.campus.findMany({
-      where: { status: "ACTIVE" },
-      select: { id: true, name: true, code: true, city: true },
-      orderBy: { name: "asc" },
-      take: 12,
-    }),
-    prisma.category.findMany({
-      where: { isActive: true, campus: { status: "ACTIVE" } },
-      select: { name: true, slug: true },
-      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-      take: 24,
-    }),
-    prisma.vendorProfile.count({
-      where: { status: "APPROVED", campus: { status: "ACTIVE" } },
-    }),
-    prisma.product.count({
-      where: {
-        deletedAt: null,
-        isAvailable: true,
-        vendorProfile: { status: "APPROVED" },
-        campus: { status: "ACTIVE" },
-      },
-    }),
-  ]);
+  //
+  // Wrapped in a catch because this page is prerendered at build time. A CI
+  // runner with no route to the database, or a paused Postgres instance, would
+  // otherwise throw during export and fail the whole deployment over a section
+  // of marketing copy. Every consumer below already handles empty arrays — the
+  // campus strip, category grid and proof strip each render nothing rather than
+  // an empty frame — so degrading is genuinely safe here. The page is
+  // revalidated, so the first successful request after recovery repopulates it.
+  let result;
+  try {
+    result = await Promise.all([
+      prisma.campus.findMany({
+        where: { status: "ACTIVE" },
+        select: { id: true, name: true, code: true, city: true },
+        orderBy: { name: "asc" },
+        take: 12,
+      }),
+      prisma.category.findMany({
+        where: { isActive: true, campus: { status: "ACTIVE" } },
+        select: { name: true, slug: true },
+        orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+        take: 24,
+      }),
+      prisma.vendorProfile.count({
+        where: { status: "APPROVED", campus: { status: "ACTIVE" } },
+      }),
+      prisma.product.count({
+        where: {
+          deletedAt: null,
+          isAvailable: true,
+          vendorProfile: { status: "APPROVED" },
+          campus: { status: "ACTIVE" },
+        },
+      }),
+    ]);
+  } catch (error) {
+    console.error("[landing] could not load public marketplace summary", error);
+    return EMPTY_LANDING;
+  }
+
+  const [campuses, categories, vendors, products] = result;
 
   // The same category name can exist on several campuses; the landing page shows
   // the concept, not each campus's copy of it.
