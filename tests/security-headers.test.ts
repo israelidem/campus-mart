@@ -40,18 +40,39 @@ describe("content security policy", () => {
     expect(directive(production, "base-uri")).toBe("base-uri 'self'");
   });
 
-  it("never allows inline or eval script in production", () => {
-    // This is the directive the whole header exists for. With `'unsafe-inline'`
-    // here, an injected <script> runs and the rest of the policy is decoration.
+  it("allows inline script, because Next.js hydration depends on it", () => {
+    // This assertion is inverted from what it was, and the reversal is the point.
+    //
+    // It used to require `script-src 'self'` exactly. That is the stricter
+    // policy, and it is also what broke the production app: the App Router emits
+    // un-nonced inline scripts carrying the RSC flight payload, so the browser
+    // blocked them, React never hydrated, and every form fell back to a native
+    // submit that just reloaded the page. Sign-in was unusable in production
+    // while this test passed — which is exactly how a test can hold a bug in
+    // place.
+    //
+    // The directive is asserted positively here so nobody "tightens" it back
+    // without reading why it is loose. See lib/security/headers.ts for the two
+    // stricter options (per-request nonce, script hashing) and what each costs.
     const scriptSrc = directive(production, "script-src");
 
-    expect(scriptSrc).toBe("script-src 'self'");
-    expect(scriptSrc).not.toContain("unsafe-inline");
-    expect(scriptSrc).not.toContain("unsafe-eval");
+    expect(scriptSrc).toContain("'self'");
+    expect(scriptSrc).toContain("'unsafe-inline'");
   });
 
-  it("allows eval only in development, for Turbopack's HMR client", () => {
+  it("still never allows eval in production", () => {
+    // Inline script is conceded above; `eval` is not. Turbopack's HMR client is
+    // the only thing that needs it, and it must not ship.
+    expect(directive(production, "script-src")).not.toContain("unsafe-eval");
     expect(directive(development, "script-src")).toContain("'unsafe-eval'");
+  });
+
+  it("keeps constraining where script may be loaded from", () => {
+    // What survives without `'unsafe-inline'` doing the work: no foreign script
+    // origin is named anywhere in the policy, so an injected
+    // `<script src="https://evil.example">` is still refused.
+    expect(directive(production, "script-src")).not.toContain("http");
+    expect(directive(production, "default-src")).toBe("default-src 'self'");
   });
 
   it("allows inline styles, which Next.js and Tailwind require", () => {

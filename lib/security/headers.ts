@@ -30,14 +30,45 @@ const PAYSTACK_ORIGINS = ["https://api.paystack.co", "https://checkout.paystack.
  * are compiled into a stylesheet; a nonce-per-request scheme for styles would
  * mean giving up static rendering for a class of injection that cannot execute.
  *
- * `script-src` deliberately does **not** carry `'unsafe-inline'` in production.
- * Next.js's own bootstrap scripts are hashed or nonced by the framework, and
- * leaving inline script open would make the whole policy decorative — the header
- * exists to stop injected script, and that is the directive that stops it.
+ * ── Why `script-src` also allows inline ────────────────────────────────────
  *
- * In development, `'unsafe-eval'` is allowed because Turbopack's HMR client needs
- * it. It is gated on the flag rather than always-on for the usual reason: the
- * development convenience must not ship.
+ * This previously read `script-src 'self'` in production, on the reasoning that
+ * Next.js's own bootstrap scripts are hashed or nonced by the framework. That
+ * assumption was wrong, and it broke the application in production while every
+ * local `next dev` session looked fine.
+ *
+ * The App Router emits inline `<script>` tags with **no nonce and no hash**: the
+ * bootstrap tag, and the `self.__next_f.push(...)` tags carrying the React
+ * Server Component flight payload. Under `script-src 'self'` the browser refuses
+ * them, the payload never arrives, and React never hydrates. The page still
+ * *looks* right, because `style-src` permits the CSS — so the failure is
+ * invisible until you interact with it. Every `onSubmit` and `onClick` is dead,
+ * and a submit button falls back to a native form submission that reloads the
+ * page. That is exactly how sign-in "just refreshed" instead of signing in.
+ *
+ * Next.js supports two ways to keep this directive strict, and both cost more
+ * than they return here:
+ *
+ *  1. **A per-request nonce from middleware.** Next stamps the nonce it finds in
+ *     the request's CSP header onto its inline scripts. A nonce is unique per
+ *     response by definition, so every page becomes dynamically rendered: the
+ *     landing page's ISR and the prerendered auth screens are all forfeited, and
+ *     any cached HTML would serve a stale nonce and fail exactly like this bug.
+ *  2. **Hashing the inline scripts.** Their contents include per-build chunk ids
+ *     and per-page flight data, so the hashes change on every build and every
+ *     route. There is nothing stable to pin.
+ *
+ * So inline script is permitted, and the policy keeps its remaining teeth:
+ * `default-src 'self'` still blocks foreign script *sources*, `object-src 'none'`
+ * and `base-uri 'self'` close the classic injection vectors, `frame-ancestors
+ * 'none'` blocks clickjacking, and `connect-src` still names every origin this
+ * app may talk to. The honest summary is that this header now constrains where
+ * script may come from, not whether inline script may run — and this project's
+ * real XSS defence is React escaping output plus Zod validating input at every
+ * route boundary.
+ *
+ * `'unsafe-eval'` stays development-only, because Turbopack's HMR client needs it
+ * and that convenience must not ship.
  */
 export function contentSecurityPolicy(options?: { development?: boolean }): string {
   const development = options?.development ?? false;
@@ -52,7 +83,12 @@ export function contentSecurityPolicy(options?: { development?: boolean }): stri
     "frame-ancestors": ["'none'"],
     "form-action": ["'self'", ...PAYSTACK_ORIGINS],
     "frame-src": ["'self'", ...PAYSTACK_ORIGINS],
-    "script-src": development ? ["'self'", "'unsafe-eval'", "'unsafe-inline'"] : ["'self'"],
+    // See the note above before tightening this: `'unsafe-inline'` is what keeps
+    // React hydrating in production. Removing it does not raise an error — it
+    // silently kills every client-side interaction in the app.
+    "script-src": development
+      ? ["'self'", "'unsafe-inline'", "'unsafe-eval'"]
+      : ["'self'", "'unsafe-inline'"],
     "style-src": ["'self'", "'unsafe-inline'"],
     // `data:` covers the inline SVG icons; `blob:` covers a preview of a file the
     // user has just chosen, before it is uploaded.

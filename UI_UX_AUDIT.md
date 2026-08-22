@@ -206,6 +206,78 @@ not rewritten.
 
 ---
 
+## 7b. Two production-only bugs found after the first deploy
+
+Both were invisible in `next dev` and only appeared once the app was built and
+deployed. Recording them because the *class* of bug matters more than the fix:
+in both cases local development and the test suite agreed that everything was
+fine.
+
+### The whole app was shipped without hydration (critical)
+
+**Symptom.** Sign-in appeared to do nothing — the page just reloaded, with no
+error shown and nothing in the server log except a successful GET.
+
+**Cause.** `lib/security/headers.ts` set `script-src 'self'` in production. The
+App Router emits inline `<script>` tags with no nonce and no hash: the bootstrap
+tag, plus the `self.__next_f.push(...)` tags carrying the RSC flight payload.
+The browser refused all of them, so React never hydrated **anywhere in the
+application**.
+
+This is worth dwelling on, because sign-in was only the first place anyone
+noticed it:
+
+- Every `onClick` and `onSubmit` in the product was dead — add-to-cart, the
+  account sheet, the quantity stepper, filters, toasts, admin approve/reject.
+- The pages still looked correct, because `style-src` permits inline styles. So
+  the app looked finished and did nothing.
+- On the sign-in form specifically, the dead `onSubmit` meant the browser fell
+  back to a **native form submission**, which reloaded the page — precisely the
+  reported symptom.
+
+**Fix.** `script-src` now carries `'unsafe-inline'` in production. The two
+stricter alternatives were considered and rejected: a per-request nonce forces
+every page to render dynamically (losing the landing page's ISR and every
+prerendered auth screen, and breaking on any cached HTML), and hashing is
+impossible because the inline content includes per-build chunk ids and per-page
+flight data. `default-src 'self'` still blocks foreign script sources,
+`object-src 'none'` and `base-uri 'self'` remain, and `'unsafe-eval'` is still
+development-only.
+
+**Why the test suite did not catch it.** `tests/security-headers.test.ts`
+asserted `expect(scriptSrc).toBe("script-src 'self'")` — it actively required
+the broken policy, with a comment explaining that anything looser would make the
+header "decoration". The test was green while the application was unusable. It
+has been inverted and now asserts `'unsafe-inline'` is present, with the
+reasoning inline so nobody re-tightens it.
+
+### `/sign-in` could not be built at all
+
+**Symptom.** `next build` failed on Vercel with a minified React error and
+`Next.js build worker exited with code: 1`, pointing at no file in this project.
+
+**Cause.** `/sign-in` was a client component calling `useSearchParams()` at the
+top level to read `?reason=session-expired`. That hook cannot resolve during
+prerender, and without a `<Suspense>` boundary Next treats it as fatal during
+static export. `next dev` never prerenders, so it never complained.
+
+**Fix.** Split into a server page (`app/(auth)/sign-in/page.tsx`, holding the
+heading and metadata) and a client form (`components/auth/sign-in-form.tsx`).
+Only `SignInReasonNotice` — the one component that reads the query string — sits
+inside `<Suspense>`. Wrapping the whole page would have been the quicker fix but
+would have made the entire form client-rendered and flashed a fallback where the
+email field belongs, for the sake of a banner most people never see. `/sign-in`
+now reports as `○ (Static)`.
+
+**Also hardened while here.** `app/page.tsx` reads live vendor/product/campus
+counts and is prerendered, so on Vercel that query runs against the production
+database *at build time*. A paused Postgres instance would have failed the
+deploy over marketing copy. That read is now wrapped in a `try/catch` that logs
+and falls back to zeroed data; every consumer already handles empty arrays, and
+`revalidate = 300` repopulates it on the first successful request.
+
+---
+
 ## 8. Remaining issues — this work is NOT finished
 
 Stating this plainly, because §34 and §35 forbid a false completion claim.
