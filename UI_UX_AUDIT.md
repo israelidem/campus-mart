@@ -462,10 +462,31 @@ Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
    because `/verify-email` is a static instructions page — email delivery is out
    of MVP scope (PRD §53) and no resend endpoint exists. A "Resend" button there
    would have been exactly the fake button §28 forbids.
-6. **Cart, checkout, invoice, orders and delivery tracking have not been
-   re-skinned.** They inherit the tokens through the primitives, so they are no
-   longer actively broken-looking, but the `Discover → Shop → Checkout → Receive`
-   spine is only styled through its first two steps.
+6. **Cart and checkout are done; invoice, orders and delivery tracking are not.**
+   `/cart` now has the §22 empty state, a sticky order summary, −/+ steppers
+   matching the product page, unorderable lines separated visually rather than
+   explained in red text, and inline phone validation mirroring the server's
+   schema. Two real bugs were fixed here, both invisible from a screenshot:
+
+   - **Double-tapping "Place order" could create two orders.** The busy flag
+     wrapped only the `router.push`, so for the entire duration of
+     `POST /api/orders` the button stayed live. On a slow campus connection that
+     is two orders, two invoices and two charges. The flag now covers the request
+     and is deliberately never cleared on success, so the final frame before
+     navigation cannot be tapped again.
+   - **A database outage told students their account was unverified.** The page's
+     `catch {}` treated every failure as an authorization refusal, so any blip
+     would send a fully verified student to their campus admin over an outage.
+     Only `ForbiddenError` produces that message now; everything else is logged
+     and re-thrown so `app/error.tsx` offers a retry (§23).
+
+   Also corrected: the delivery location was pre-selected as `locations[0]`
+   regardless of how many existed, which silently sends food to the wrong hostel.
+   It is now only pre-filled when the campus has exactly one.
+
+   Invoice, orders and delivery tracking remain un-re-skinned, so the
+   `Discover → Shop → Checkout → Receive` spine is styled through *Checkout* but
+   not to *Receive*.
 7. **Vendor, agent and campus-admin screens have not been re-skinned.** The
    delivery-agent workflow (§18) in particular still needs to become a guided
    sequence rather than a dashboard. Two super-admin/admin surfaces *are* done:
@@ -531,9 +552,10 @@ reasoning about the code.
 ### Suggested next step
 
 Deploy with a Blob store attached and clear item 13 — it is the only outstanding
-item that can still lose user data, and it needs the real service. Then re-skin
-cart, checkout and invoice so the second half of the
-`Discover → Shop → Checkout → Receive` spine matches the first; then the
+item that can still lose user data, and it needs the real service. Then finish the
+`Discover → Shop → Checkout → Receive` spine: invoice, orders and delivery
+tracking are the three screens still inheriting only the tokens, and they are the
+half of the journey where a student is waiting on money and food. Then the
 delivery-agent workflow (§18), which is the most consequential remaining screen
 because it is used outdoors, one-handed, under time pressure. Finally the §25
 visual pass, which needs a real device or emulator rather than more reasoning.

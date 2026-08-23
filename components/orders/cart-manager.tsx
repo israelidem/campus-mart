@@ -2,23 +2,42 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import * as React from "react";
 
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Card, CardTitle } from "@/components/ui/card";
+import { Field, Input, Select, Textarea } from "@/components/ui/field";
+import { BrowseMarketplaceEmpty, Notice } from "@/components/ui/state";
+import { useToast } from "@/components/ui/toast";
 import { ApiClientError, apiDelete, apiPatch, apiPost } from "@/lib/api/client";
 import type { CartView } from "@/lib/orders/cart-view";
 import { formatKobo } from "@/lib/money";
+import { cn } from "@/lib/utils";
 
 /**
  * Cart and checkout (PRD §25–26).
  *
- * The component holds no prices of its own: every mutation returns the freshly
- * priced cart from the server and that replaces the local state, so what the
- * student sees is always what the server would charge. The delivery fee is
- * deliberately not previewed as a number here — it is computed at checkout from
- * the destination, and inventing a client-side estimate would be a promise the
- * server has not made.
+ * The data contract is unchanged and deliberately so: the component holds no
+ * prices of its own, every mutation adopts the freshly priced cart the server
+ * returns, and the delivery fee is still not previewed as a number because it is
+ * computed at checkout from the destination. Inventing a client-side estimate
+ * would be a promise the server has not made.
+ *
+ * What the redesign changed:
+ *
+ *  • **A real duplicate-order guard.** `isPending` previously wrapped only the
+ *    `router.push`, so for the whole duration of `POST /api/orders` the button
+ *    was still enabled. Two taps on a slow campus connection meant two orders,
+ *    two invoices and two charges. The busy flag now covers the request itself.
+ *  • The `type="number"` quantity input became a −/+ stepper, matching
+ *    `add-to-cart.tsx`. Native spinners are far below the 44px touch floor.
+ *  • Lines that cannot be ordered are visually separated from lines that can,
+ *    rather than explained in red text under an otherwise normal-looking row.
+ *  • Delivery location is only pre-selected when the campus has exactly one.
+ *    Silently defaulting to the first of several sends food to the wrong hostel,
+ *    and the student would not notice until it arrived somewhere else.
+ *  • The phone number is validated inline against the same shape the server
+ *    enforces, so the error arrives before the order is attempted.
  */
 
 export type DeliveryLocationOption = {
@@ -32,24 +51,48 @@ type Props = {
   locations: DeliveryLocationOption[];
 };
 
+/**
+ * Mirrors `contactPhoneSchema` in validations/order.ts. The server remains the
+ * authority — this only saves a round trip on an obviously wrong number.
+ */
+function phoneError(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return "We need a number the agent can call.";
+  if (trimmed.length < 7) return "That number looks too short.";
+  if (!/^\+?[0-9\s-]+$/.test(trimmed)) return "Use digits only, with an optional +234 prefix.";
+  return null;
+}
+
 export function CartManager({ cart: initialCart, locations }: Props) {
   const router = useRouter();
-  const [cart, setCart] = useState(initialCart);
-  const [error, setError] = useState<string | null>(null);
-  const [busyItemId, setBusyItemId] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
+  const toast = useToast();
 
-  const [locationId, setLocationId] = useState(locations[0]?.id ?? "");
-  const [deliveryNote, setDeliveryNote] = useState("");
-  const [contactPhone, setContactPhone] = useState("");
+  const [cart, setCart] = React.useState(initialCart);
+  const [busyItemId, setBusyItemId] = React.useState<string | null>(null);
+  const [isPlacing, setIsPlacing] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  // Pre-selected only when there is no choice to get wrong.
+  const [locationId, setLocationId] = React.useState(
+    locations.length === 1 ? (locations[0]?.id ?? "") : "",
+  );
+  const [deliveryNote, setDeliveryNote] = React.useState("");
+  const [contactPhone, setContactPhone] = React.useState("");
+  const [phoneTouched, setPhoneTouched] = React.useState(false);
+
+  const phoneProblem = phoneError(contactPhone);
+  const blockedLines = cart.vendors.flatMap((vendor) =>
+    vendor.items.filter((item) => !item.isOrderable),
+  );
 
   /** Runs a cart mutation and adopts the server's version of the cart. */
-  async function mutate(itemId: string | null, action: () => Promise<{ cart: CartView }>) {
+  async function mutate(itemId: string, action: () => Promise<{ cart: CartView }>) {
     setError(null);
     setBusyItemId(itemId);
     try {
       const result = await action();
       setCart(result.cart);
+      router.refresh(); // keeps the header's cart count honest
     } catch (caught) {
       setError(
         caught instanceof ApiClientError ? caught.message : "Something went wrong. Please try again.",
@@ -59,191 +102,278 @@ export function CartManager({ cart: initialCart, locations }: Props) {
     }
   }
 
-  async function checkout() {
+  async function placeOrder() {
+    if (isPlacing) return; // belt and braces alongside the disabled attribute
     setError(null);
+    setIsPlacing(true);
     try {
       const { order } = await apiPost<{ order: { id: string } }>("/api/orders", {
         deliveryLocationId: locationId,
         deliveryNote: deliveryNote.trim() === "" ? undefined : deliveryNote.trim(),
-        contactPhone,
+        contactPhone: contactPhone.trim(),
       });
-      startTransition(() => router.push(`/orders/${order.id}`));
+      toast.success("Order placed");
+      router.push(`/orders/${order.id}`);
+      // Intentionally not clearing `isPlacing`: the button stays busy until the
+      // new route takes over, so the last frame before navigation cannot be
+      // tapped again.
     } catch (caught) {
       setError(
         caught instanceof ApiClientError ? caught.message : "Something went wrong. Please try again.",
       );
+      setIsPlacing(false);
     }
   }
 
   if (cart.vendors.length === 0) {
     return (
-      <Card>
-        <p className="text-sm">Your cart is empty.</p>
-        <p className="mt-2 text-sm">
-          <Link href="/marketplace" className="underline">
-            Browse the marketplace
-          </Link>
-
-        </p>
-      </Card>
+      <BrowseMarketplaceEmpty
+        title="Your cart is empty"
+        description="Discover something good on campus."
+      />
     );
   }
 
+  const canPlaceOrder =
+    cart.isCheckoutReady && locationId !== "" && phoneProblem === null && !isPlacing;
+
   return (
-    <div className="space-y-4">
-      {error ? (
-        <p role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-700">
-          {error}
-        </p>
-      ) : null}
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
+      <div className="space-y-4">
+        {error ? (
+          <Notice tone="danger" title="That didn't work">
+            {error}
+          </Notice>
+        ) : null}
 
-      {cart.vendors.map((vendor) => (
-        <Card key={vendor.vendorProfileId}>
-          <div className="flex items-baseline justify-between gap-2">
-            <h2 className="font-medium">{vendor.storeName}</h2>
-            <span className="text-sm opacity-70">{formatKobo(vendor.goodsSubtotalKobo)}</span>
-          </div>
+        {blockedLines.length > 0 ? (
+          <Notice tone="warning" title="Some items can't be ordered right now">
+            Remove them, or come back when they’re available. The rest of your cart is fine.
+          </Notice>
+        ) : null}
 
-          <ul className="mt-3 space-y-3">
-            {vendor.items.map((item) => (
-              <li key={item.id} className="border-t border-current/10 pt-3 first:border-0 first:pt-0">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium">{item.productName}</p>
-                    <p className="text-sm opacity-70">
-                      {formatKobo(item.unitPriceKobo)}
-                      {item.unitLabel ? ` per ${item.unitLabel}` : null}
-                    </p>
-                  </div>
-                  <p className="text-sm font-medium">{formatKobo(item.lineTotalKobo)}</p>
-                </div>
-
-                <div className="mt-2 flex items-center gap-2">
-                  <label className="text-sm" htmlFor={`quantity-${item.id}`}>
-                    Quantity
-                  </label>
-                  <input
-                    id={`quantity-${item.id}`}
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    max={Math.max(item.stockQuantity, 1)}
-                    value={item.quantity}
-                    disabled={busyItemId === item.id}
-                    onChange={(event) => {
-                      const quantity = Number(event.target.value);
-                      if (!Number.isInteger(quantity) || quantity < 1) return;
-                      void mutate(item.id, () =>
-                        apiPatch<{ cart: CartView }>(`/api/cart/items/${item.id}`, { quantity }),
-                      );
-                    }}
-                    className="h-11 w-20 rounded-xl border border-current/20 px-2 text-sm"
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    isLoading={busyItemId === item.id}
-                    onClick={() =>
-                      void mutate(item.id, () =>
-                        apiDelete<{ cart: CartView }>(`/api/cart/items/${item.id}`),
-                      )
-                    }
-                  >
-                    Remove
-                  </Button>
-                </div>
-
-                {item.unorderableReason ? (
-                  <p className="mt-2 text-sm text-red-700">{item.unorderableReason}</p>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        </Card>
-      ))}
-
-      <Card>
-        <div className="flex items-baseline justify-between gap-2">
-          <span className="text-sm">Items</span>
-          <span className="text-sm">{formatKobo(cart.goodsSubtotalKobo)}</span>
-        </div>
-        <p className="mt-2 text-sm opacity-70">
-          The delivery fee is calculated from the location you choose and shown on your invoice
-          before you pay.
-        </p>
-      </Card>
-
-      <Card>
-        <h2 className="font-medium">Where should this go?</h2>
-
-        {locations.length === 0 ? (
-          <p className="mt-2 text-sm">
-            Your campus has no delivery locations yet. Ask your campus admin to add one.
-          </p>
-        ) : (
-          <div className="mt-3 space-y-3">
-            <div>
-              <label className="block text-sm" htmlFor="delivery-location">
-                Delivery location
-              </label>
-              <select
-                id="delivery-location"
-                value={locationId}
-                onChange={(event) => setLocationId(event.target.value)}
-                className="mt-1 h-11 w-full rounded-xl border border-current/20 px-2 text-sm"
+        {cart.vendors.map((vendor) => (
+          <Card key={vendor.vendorProfileId} flush>
+            <div className="flex items-baseline justify-between gap-3 border-b border-rule px-4 py-3 sm:px-5">
+              <Link
+                href={`/store/${vendor.vendorProfileId}`}
+                className="min-w-0 truncate font-medium text-ink hover:text-brand-700"
               >
-                {locations.map((location) => (
-                  <option key={location.id} value={location.id}>
-                    {location.name}
-                  </option>
-                ))}
-              </select>
+                {vendor.storeName}
+              </Link>
+              <span className="shrink-0 font-mono text-sm tabular-nums text-ink-2">
+                {formatKobo(vendor.goodsSubtotalKobo)}
+              </span>
             </div>
 
-            <div>
-              <label className="block text-sm" htmlFor="delivery-note">
-                Room, flat or landmark (optional)
-              </label>
-              <input
+            <ul className="divide-y divide-rule">
+              {vendor.items.map((item) => {
+                const isBusy = busyItemId === item.id;
+                const atStockCeiling = item.quantity >= item.stockQuantity;
+
+                return (
+                  <li
+                    key={item.id}
+                    className={cn(
+                      "px-4 py-4 sm:px-5",
+                      item.isOrderable ? null : "bg-warning-soft/40",
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-medium text-ink">{item.productName}</p>
+                        <p className="mt-0.5 text-sm text-ink-3">
+                          <span className="font-mono tabular-nums">
+                            {formatKobo(item.unitPriceKobo)}
+                          </span>
+                          {item.unitLabel ? ` per ${item.unitLabel}` : null}
+                        </p>
+                      </div>
+                      <p className="shrink-0 font-mono text-sm font-medium tabular-nums text-ink">
+                        {formatKobo(item.lineTotalKobo)}
+                      </p>
+                    </div>
+
+                    {item.unorderableReason ? (
+                      <p className="mt-2 text-sm font-medium text-warning-strong">
+                        {item.unorderableReason}
+                      </p>
+                    ) : null}
+
+                    <div className="mt-3 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-1 rounded-control border border-rule-2 bg-surface p-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Reduce ${item.productName} quantity`}
+                          disabled={isBusy || item.quantity <= 1}
+                          onClick={() =>
+                            void mutate(item.id, () =>
+                              apiPatch<{ cart: CartView }>(`/api/cart/items/${item.id}`, {
+                                quantity: item.quantity - 1,
+                              }),
+                            )
+                          }
+                        >
+                          <span aria-hidden>−</span>
+                        </Button>
+
+                        <span
+                          className="min-w-10 text-center font-mono text-sm tabular-nums"
+                          aria-live="polite"
+                          aria-label={`Quantity: ${item.quantity}`}
+                        >
+                          {item.quantity}
+                        </span>
+
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Increase ${item.productName} quantity`}
+                          disabled={isBusy || atStockCeiling}
+                          onClick={() =>
+                            void mutate(item.id, () =>
+                              apiPatch<{ cart: CartView }>(`/api/cart/items/${item.id}`, {
+                                quantity: item.quantity + 1,
+                              }),
+                            )
+                          }
+                        >
+                          <span aria-hidden>+</span>
+                        </Button>
+                      </div>
+
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        isLoading={isBusy}
+                        onClick={() =>
+                          void mutate(item.id, () =>
+                            apiDelete<{ cart: CartView }>(`/api/cart/items/${item.id}`),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </div>
+
+                    {atStockCeiling && item.isOrderable ? (
+                      <p className="mt-2 text-xs text-ink-3">
+                        That’s all {vendor.storeName} has left.
+                      </p>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </Card>
+        ))}
+      </div>
+
+      <div className="space-y-4 lg:sticky lg:top-20">
+        <Card>
+          <CardTitle className="text-base">Order summary</CardTitle>
+
+          <dl className="mt-3 space-y-2 text-sm">
+            <div className="flex items-baseline justify-between gap-2">
+              <dt className="text-ink-2">
+                Items{cart.itemCount > 0 ? ` (${cart.itemCount})` : null}
+              </dt>
+              <dd className="font-mono tabular-nums">{formatKobo(cart.goodsSubtotalKobo)}</dd>
+            </div>
+            <div className="flex items-baseline justify-between gap-2">
+              <dt className="text-ink-2">Delivery</dt>
+              <dd className="text-ink-3">Calculated at checkout</dd>
+            </div>
+          </dl>
+
+          <p className="mt-3 border-t border-rule pt-3 text-sm text-ink-3">
+            Your delivery fee depends on where this is going. You’ll see the full total on your
+            invoice before you pay.
+          </p>
+        </Card>
+
+        <Card>
+          <CardTitle className="text-base">Where should this go?</CardTitle>
+
+          {locations.length === 0 ? (
+            <Notice tone="warning" className="mt-3">
+              Your campus has no delivery locations yet. Ask your campus admin to add one — orders
+              can’t be placed until then.
+            </Notice>
+          ) : (
+            <div className="mt-4 space-y-4">
+              <Field id="delivery-location" label="Delivery location">
+                <Select
+                  value={locationId}
+                  onChange={(event) => setLocationId(event.target.value)}
+                >
+                  {locations.length === 1 ? null : (
+                    <option value="">Choose a location</option>
+                  )}
+                  {locations.map((location) => (
+                    <option key={location.id} value={location.id}>
+                      {location.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+
+              <Field
                 id="delivery-note"
-                value={deliveryNote}
-                maxLength={300}
-                onChange={(event) => setDeliveryNote(event.target.value)}
-                className="mt-1 h-11 w-full rounded-xl border border-current/20 px-2 text-sm"
-              />
-            </div>
+                label="Room, flat or landmark"
+                optional
+                hint={`${deliveryNote.length}/300`}
+              >
+                <Textarea
+                  rows={2}
+                  maxLength={300}
+                  value={deliveryNote}
+                  placeholder="Block B, Room 204"
+                  onChange={(event) => setDeliveryNote(event.target.value)}
+                />
+              </Field>
 
-            <div>
-              <label className="block text-sm" htmlFor="contact-phone">
-                Phone number for the delivery agent
-              </label>
-              <input
+              <Field
                 id="contact-phone"
-                type="tel"
-                inputMode="tel"
-                value={contactPhone}
-                onChange={(event) => setContactPhone(event.target.value)}
-                className="mt-1 h-11 w-full rounded-xl border border-current/20 px-2 text-sm"
-              />
+                label="Phone number"
+                hint="The delivery agent calls this when they arrive."
+                error={phoneTouched && phoneProblem ? phoneProblem : undefined}
+              >
+                <Input
+                  type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  value={contactPhone}
+                  placeholder="0803 000 0000"
+                  onBlur={() => setPhoneTouched(true)}
+                  onChange={(event) => setContactPhone(event.target.value)}
+                />
+              </Field>
+
+              <Button
+                size="lg"
+                block
+                isLoading={isPlacing}
+                loadingLabel="Placing order…"
+                disabled={!canPlaceOrder}
+                onClick={() => {
+                  setPhoneTouched(true);
+                  if (canPlaceOrder) void placeOrder();
+                }}
+              >
+                Place order
+              </Button>
+
+              {!cart.isCheckoutReady ? (
+                <p className="text-sm text-warning-strong">
+                  Remove the flagged items above before placing this order.
+                </p>
+              ) : null}
             </div>
-
-            <Button
-              size="lg"
-              isLoading={isPending}
-              disabled={!cart.isCheckoutReady || locationId === "" || contactPhone.trim() === ""}
-              onClick={() => void checkout()}
-            >
-              Place order
-            </Button>
-
-            {!cart.isCheckoutReady ? (
-              <p className="text-sm text-red-700">
-                Fix the highlighted items above before placing this order.
-              </p>
-            ) : null}
-          </div>
-        )}
-      </Card>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }
