@@ -452,14 +452,27 @@ Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
 3. **Sign-up is still a single-page form.** The four-step flow in §13 is not built.
 4. **Forgot-password does not exist.** The sign-in page currently links to email
    verification instead, which is honest but incomplete.
-5. **Onboarding completion screen** (§15, "You're almost there") is not built.
+5. ~~**Onboarding completion screen** (§15, "You're almost there").~~ **Closed.**
+   `/student/onboarding` now renders a four-step progress spine (account → email →
+   details → campus verification) across all six states, with a receipt of what
+   was submitted while pending. Two things changed during the build: the registry
+   flag reads "Manual check" rather than "Not found", because campuses often
+   upload their registry after students sign up and an admin can approve either
+   way; and the unverified-email CTA reads "What to do next" rather than "Resend",
+   because `/verify-email` is a static instructions page — email delivery is out
+   of MVP scope (PRD §53) and no resend endpoint exists. A "Resend" button there
+   would have been exactly the fake button §28 forbids.
 6. **Cart, checkout, invoice, orders and delivery tracking have not been
    re-skinned.** They inherit the tokens through the primitives, so they are no
    longer actively broken-looking, but the `Discover → Shop → Checkout → Receive`
    spine is only styled through its first two steps.
-7. **Vendor, agent, admin and super-admin screens have not been re-skinned.** The
+7. **Vendor, agent and campus-admin screens have not been re-skinned.** The
    delivery-agent workflow (§18) in particular still needs to become a guided
-   sequence rather than a dashboard.
+   sequence rather than a dashboard. Two super-admin/admin surfaces *are* done:
+   the campus manager (token-based table, mobile card list, and a confirmation
+   dialog on deactivation, which previously took effect on a single click) and
+   the analytics dashboard (§19 hierarchy, accessible bar chart with a
+   screen-reader table fallback).
 8. **Bottom navigation is text-only.** It works and fits 320px, but §16 implies
    icons, and it has no cart affordance.
 9. **Responsive QA (§25) was reasoned about, not measured.** Layouts were built
@@ -484,13 +497,16 @@ Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
     `Chicken & Chips` and `Egusi`. `scripts/verify-routes.ts` reports data depth
     and route status together so this stays a one-command check.
 
-11. **Super-admin campuses and campus analytics are still unstyled.** Both
-    render real data and both are reachable, but they predate the design system:
-    `components/super-admin/campus-manager.tsx` is a bare form-and-list, and
-    `components/admin/analytics-dashboard.tsx` prints figures as text where §19
-    asks for charts. Untouched deliberately — see the note below.
-12. **Student profile/verification status is thin** (§15 overlaps). The pending
-    state is communicated but not designed.
+11. ~~**Super-admin campuses and campus analytics are unstyled.**~~ **Closed.**
+    Both were rebuilt on the tokens. The campus manager became a responsive
+    table (cards below `md`, since a five-column table cannot be read on a
+    375px screen) and gained a confirmation dialog on deactivation — it
+    previously suspended an entire campus, logging out every user in it, on one
+    unguarded click. The analytics dashboard now leads with the figures a
+    campus admin acts on, and its bar chart carries a visually-hidden data table
+    so the numbers are reachable by screen reader rather than encoded only in
+    bar widths.
+12. ~~**Student profile/verification status is thin.**~~ **Closed** — see item 5.
 13. **Blob storage has not been exercised against a real store.** The driver is
     type-checked and the local path is unchanged and still green, but nothing has
     yet uploaded a byte to Vercel Blob. First deploy with a store attached must
@@ -498,20 +514,26 @@ Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
     response `Content-Type` is the sniffed type, and confirm a signed-out request
     for the same document is refused.
 
-### Why I stopped here rather than continuing
+### What is verified, and how
 
-Items 11 and 12 are the next work, and I did not start them. Rewriting the
-analytics dashboard is a ~400-line change, and beginning it with the context I
-had left would most likely have produced a half-converted file — worse than an
-unstyled one that works, because it would look finished. The four bugs in §7d
-were each verified before being written down; I would rather hand over three
-honest items than a fourth that claims more than it did.
+Everything above was checked before being written down. At the current commit:
+`npx tsc --noEmit` is clean, all **392 tests across 23 files** pass,
+`npm run lint` is clean, and `npm run verify:routes` compiles and renders the
+landing page, sign-in, marketplace and a storefront against a seeded database
+(2 campuses, 5 approved vendors, 8 categories, 25 products), asserting that the
+two protected routes redirect anonymous visitors rather than 500.
+
+What that does **not** cover, stated so the gap is not mistaken for coverage: no
+screen has been opened at 320/375/390/430px, and no byte has been uploaded to a
+real Blob store. Both need a browser and a deployment; neither can be closed by
+reasoning about the code.
 
 ### Suggested next step
 
 Deploy with a Blob store attached and clear item 13 — it is the only outstanding
 item that can still lose user data, and it needs the real service. Then re-skin
 cart, checkout and invoice so the second half of the
-`Discover → Shop → Checkout → Receive` spine matches the first, then items 11–12,
-and finally the §25 visual pass at 320/375/390/430px, which needs a real device
-or emulator rather than more reasoning.
+`Discover → Shop → Checkout → Receive` spine matches the first; then the
+delivery-agent workflow (§18), which is the most consequential remaining screen
+because it is used outdoors, one-handed, under time pressure. Finally the §25
+visual pass, which needs a real device or emulator rather than more reasoning.

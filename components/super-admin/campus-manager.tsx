@@ -3,9 +3,13 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, SectionHeader, Stat } from "@/components/ui/card";
 import { Field, Input } from "@/components/ui/field";
+import { ConfirmDialog } from "@/components/ui/sheet";
+import { EmptyState, Notice } from "@/components/ui/state";
+import { useToast } from "@/components/ui/toast";
 import { ApiClientError, apiPost, fieldErrors } from "@/lib/api/client";
 
 export type CampusRow = {
@@ -27,17 +31,26 @@ export type CampusRow = {
  */
 export function CampusManager({ campuses }: { campuses: CampusRow[] }) {
   const router = useRouter();
+  const toast = useToast();
 
   const [form, setForm] = useState({ code: "", name: "", city: "", state: "" });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [createMessage, setCreateMessage] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [showCreate, setShowCreate] = useState(campuses.length === 0);
 
   const [adminEmail, setAdminEmail] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [rowMessage, setRowMessage] = useState<{ id: string; text: string; ok: boolean } | null>(
-    null,
-  );
+
+  /**
+   * Deactivation is confirmed, activation is not.
+   *
+   * Switching a campus to INACTIVE signs out every student, vendor and agent on
+   * it and stops the marketplace dead. It sat behind a single unguarded click,
+   * one row away from "Assign", with no statement of how many people it affects.
+   * Activation is harmless and stays immediate.
+   */
+  const [pendingDeactivation, setPendingDeactivation] = useState<CampusRow | null>(null);
 
   const update = (key: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement>) =>
     setForm((current) => ({ ...current, [key]: event.target.value }));
@@ -54,7 +67,10 @@ export function CampusManager({ campuses }: { campuses: CampusRow[] }) {
         city: form.city,
         state: form.state || undefined,
       });
+      const created = form.code.trim().toUpperCase();
       setForm({ code: "", name: "", city: "", state: "" });
+      setShowCreate(false);
+      toast.success(`${created} created. Assign a campus admin to open it up.`);
       router.refresh();
     } catch (error) {
       setErrors(fieldErrors(error));
@@ -66,20 +82,19 @@ export function CampusManager({ campuses }: { campuses: CampusRow[] }) {
     }
   }
 
-  async function toggleStatus(campus: CampusRow) {
+  async function setStatus(campus: CampusRow, status: "ACTIVE" | "INACTIVE") {
     setBusyId(campus.id);
-    setRowMessage(null);
     try {
-      await apiPost(`/api/super-admin/campuses/${campus.id}/status`, {
-        status: campus.status === "ACTIVE" ? "INACTIVE" : "ACTIVE",
-      });
+      await apiPost(`/api/super-admin/campuses/${campus.id}/status`, { status });
+      setPendingDeactivation(null);
+      toast.success(
+        status === "ACTIVE" ? `${campus.code} is live again.` : `${campus.code} is now closed.`,
+      );
       router.refresh();
     } catch (error) {
-      setRowMessage({
-        id: campus.id,
-        ok: false,
-        text: error instanceof ApiClientError ? error.message : "The status could not be changed.",
-      });
+      toast.error(
+        error instanceof ApiClientError ? error.message : "The status could not be changed.",
+      );
     } finally {
       setBusyId(null);
     }
@@ -88,144 +103,227 @@ export function CampusManager({ campuses }: { campuses: CampusRow[] }) {
   async function assignAdmin(campus: CampusRow) {
     const email = adminEmail[campus.id]?.trim();
     if (!email) {
-      setRowMessage({ id: campus.id, ok: false, text: "Enter the admin's email address." });
+      toast.error("Enter the admin's email address.");
       return;
     }
 
     setBusyId(campus.id);
-    setRowMessage(null);
     try {
       await apiPost(`/api/super-admin/campuses/${campus.id}/admins`, { email });
       setAdminEmail((current) => ({ ...current, [campus.id]: "" }));
-      setRowMessage({ id: campus.id, ok: true, text: `${email} now administers ${campus.code}.` });
+      toast.success(`${email} now administers ${campus.code}.`);
       router.refresh();
     } catch (error) {
-      setRowMessage({
-        id: campus.id,
-        ok: false,
-        text: error instanceof ApiClientError ? error.message : "The admin could not be assigned.",
-      });
+      toast.error(
+        error instanceof ApiClientError ? error.message : "The admin could not be assigned.",
+      );
     } finally {
       setBusyId(null);
     }
   }
 
+  const active = campuses.filter((campus) => campus.status === "ACTIVE").length;
+  const students = campuses.reduce((sum, campus) => sum + campus.counts.students, 0);
+
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Create a campus</CardTitle>
-          <CardDescription>
-            Each campus is an isolated marketplace. Its settings are created with it and can be
-            tuned by the campus admin.
-          </CardDescription>
-        </CardHeader>
-
-        <CardContent>
-          <form className="space-y-4" onSubmit={createCampus} noValidate>
-            <Field
-              id="code"
-              label="Campus code"
-              hint="Short and permanent, e.g. ABUAD. Cannot be changed later."
-              error={errors.code}
-            >
-              <Input value={form.code} onChange={update("code")} required />
-            </Field>
-
-            <Field id="name" label="Campus name" error={errors.name}>
-              <Input
-                value={form.name}
-                onChange={update("name")}
-                placeholder="Afe Babalola University"
-                required
-              />
-            </Field>
-
-            <Field id="city" label="City" error={errors.city}>
-              <Input value={form.city} onChange={update("city")} placeholder="Ado-Ekiti" required />
-            </Field>
-
-            <Field id="state" label="State (optional)" error={errors.state}>
-              <Input value={form.state} onChange={update("state")} placeholder="Ekiti" />
-            </Field>
-
-            {createMessage ? (
-              <p role="alert" className="text-sm text-red-600">
-                {createMessage}
-              </p>
-            ) : null}
-
-            <Button type="submit" disabled={creating}>
-              {creating ? "Creating…" : "Create campus"}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+    <div className="space-y-8">
+      {/*
+       * Portfolio totals first. A Super Admin opening this page is asking "how is
+       * the platform doing" before "let me edit a campus", and the answer was
+       * previously only derivable by reading every row.
+       */}
+      {campuses.length > 0 ? (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          <Stat label="Campuses" value={String(campuses.length)} />
+          <Stat label="Live" value={String(active)} />
+          <Stat label="Students" value={students.toLocaleString("en-NG")} />
+        </div>
+      ) : null}
 
       <section className="space-y-4">
-        <h2 className="text-lg font-semibold">Campuses</h2>
+        <SectionHeader
+          title="Campuses"
+          description="Each campus is an isolated marketplace with its own vendors, agents and settings."
+          action={
+            campuses.length > 0 ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setShowCreate((open) => !open)}
+                aria-expanded={showCreate}
+              >
+                {showCreate ? "Cancel" : "New campus"}
+              </Button>
+            ) : undefined
+          }
+        />
 
-        {campuses.length === 0 ? (
-          <p className="text-sm opacity-70">No campuses yet. Create the first one above.</p>
-        ) : (
-          campuses.map((campus) => (
-            <Card key={campus.id}>
-              <CardHeader>
-                <CardTitle>
-                  {campus.name} ({campus.code})
-                </CardTitle>
-                <p className="text-sm opacity-70">
-                  {[campus.city, campus.state].filter(Boolean).join(", ")} · {campus.status} ·{" "}
-                  {campus.counts.students} students · {campus.counts.admins} admins
-                </p>
-              </CardHeader>
+        {/*
+         * The create form used to occupy the top of the page permanently, which
+         * pushed the campuses themselves below the fold — wrong priority for a
+         * form used once per university.
+         */}
+        {showCreate ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>Create a campus</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <form className="space-y-4" onSubmit={createCampus} noValidate>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field
+                    id="code"
+                    label="Campus code"
+                    hint="Short and permanent, e.g. ABUAD."
+                    error={errors.code}
+                  >
+                    <Input value={form.code} onChange={update("code")} required />
+                  </Field>
 
-              <CardContent>
-                <div className="flex flex-wrap items-end gap-2">
-                  <label className="flex-1 space-y-1.5">
-                    <span className="text-sm font-medium">Assign a Campus Admin by email</span>
+                  <Field id="name" label="Campus name" error={errors.name}>
+                    <Input
+                      value={form.name}
+                      onChange={update("name")}
+                      placeholder="Afe Babalola University"
+                      required
+                    />
+                  </Field>
+
+                  <Field id="city" label="City" error={errors.city}>
+                    <Input
+                      value={form.city}
+                      onChange={update("city")}
+                      placeholder="Ado-Ekiti"
+                      required
+                    />
+                  </Field>
+
+                  <Field id="state" label="State (optional)" error={errors.state}>
+                    <Input value={form.state} onChange={update("state")} placeholder="Ekiti" />
+                  </Field>
+                </div>
+
+                {createMessage ? <Notice tone="danger">{createMessage}</Notice> : null}
+
+                <Button type="submit" isLoading={creating} loadingLabel="Creating…">
+                  Create campus
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {campuses.length === 0 && !showCreate ? (
+          <EmptyState
+            title="No campuses yet"
+            description="Create the first campus to open the platform."
+            action={<Button onClick={() => setShowCreate(true)}>Create a campus</Button>}
+          />
+        ) : null}
+
+        <div className="space-y-3">
+          {campuses.map((campus) => {
+            const busy = busyId === campus.id;
+            const place = [campus.city, campus.state].filter(Boolean).join(", ");
+            const isActive = campus.status === "ACTIVE";
+            /*
+             * A campus with no admin cannot verify a single student, so nothing
+             * on it can move. That is worth surfacing on the row rather than
+             * leaving it to be inferred from "0 admins".
+             */
+            const unmanaged = campus.counts.admins === 0;
+
+            return (
+              <Card key={campus.id} className="space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="truncate font-display text-lg font-semibold text-ink">
+                        {campus.name}
+                      </h3>
+                      <Badge tone="neutral" className="font-mono">
+                        {campus.code}
+                      </Badge>
+                      <Badge tone={isActive ? "success" : "warning"}>
+                        {isActive ? "Live" : "Closed"}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 text-sm text-muted">
+                      {place} · {campus.counts.students.toLocaleString("en-NG")} students ·{" "}
+                      {campus.counts.admins} {campus.counts.admins === 1 ? "admin" : "admins"}
+                    </p>
+                  </div>
+
+                  <Button
+                    variant={isActive ? "ghost" : "primary"}
+                    size="sm"
+                    onClick={() =>
+                      isActive ? setPendingDeactivation(campus) : setStatus(campus, "ACTIVE")
+                    }
+                    disabled={busy}
+                  >
+                    {isActive ? "Close campus" : "Reopen campus"}
+                  </Button>
+                </div>
+
+                {unmanaged ? (
+                  <Notice tone="warning">
+                    No campus admin yet. Student and vendor verifications cannot be processed until
+                    one is assigned.
+                  </Notice>
+                ) : null}
+
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                  <Field
+                    id={`admin-${campus.id}`}
+                    label="Assign a campus admin"
+                    hint="The account must already exist with a confirmed email address."
+                    className="flex-1"
+                  >
                     <Input
                       value={adminEmail[campus.id] ?? ""}
                       onChange={(event) =>
-                        setAdminEmail((current) => ({ ...current, [campus.id]: event.target.value }))
+                        setAdminEmail((current) => ({
+                          ...current,
+                          [campus.id]: event.target.value,
+                        }))
                       }
                       type="email"
                       placeholder="admin@example.com"
                     />
-                  </label>
+                  </Field>
                   <Button
                     variant="secondary"
                     onClick={() => assignAdmin(campus)}
-                    disabled={busyId === campus.id}
+                    disabled={busy}
+                    className="sm:mb-6"
                   >
                     Assign
                   </Button>
-                  <Button
-                    variant={campus.status === "ACTIVE" ? "danger" : "primary"}
-                    onClick={() => toggleStatus(campus)}
-                    disabled={busyId === campus.id}
-                  >
-                    {campus.status === "ACTIVE" ? "Deactivate" : "Activate"}
-                  </Button>
                 </div>
-
-                <p className="text-xs opacity-60">
-                  The account must already exist and have a confirmed email address.
-                </p>
-
-                {rowMessage?.id === campus.id ? (
-                  <p
-                    role="alert"
-                    className={rowMessage.ok ? "text-sm text-green-700" : "text-sm text-red-600"}
-                  >
-                    {rowMessage.text}
-                  </p>
-                ) : null}
-              </CardContent>
-            </Card>
-          ))
-        )}
+              </Card>
+            );
+          })}
+        </div>
       </section>
+
+      <ConfirmDialog
+        open={pendingDeactivation !== null}
+        onClose={() => setPendingDeactivation(null)}
+        onConfirm={() => {
+          if (pendingDeactivation) void setStatus(pendingDeactivation, "INACTIVE");
+        }}
+        tone="danger"
+        title={`Close ${pendingDeactivation?.code ?? "this campus"}?`}
+        description={
+          pendingDeactivation
+            ? `${pendingDeactivation.counts.students.toLocaleString("en-NG")} students and every vendor and delivery agent on ${pendingDeactivation.name} will lose access immediately, and the marketplace will stop taking orders. You can reopen it at any time.`
+            : undefined
+        }
+        confirmLabel="Close campus"
+        cancelLabel="Keep it open"
+        isLoading={busyId === pendingDeactivation?.id}
+      />
     </div>
   );
 }

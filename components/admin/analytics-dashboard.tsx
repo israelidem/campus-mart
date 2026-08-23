@@ -1,13 +1,12 @@
-import {
-  formatChange,
-  formatDurationMs,
-  formatRate,
-} from "@/lib/analytics/analytics-policy";
+import { Badge } from "@/components/ui/badge";
+import { Card, SectionHeader, Stat } from "@/components/ui/card";
+import { formatChange, formatDurationMs, formatRate } from "@/lib/analytics/analytics-policy";
 import type { CampusDashboard } from "@/lib/analytics/analytics-service";
 import { formatKobo } from "@/lib/money";
 // Reused rather than reimplemented: an agent's 4.50 must read the same here as it
 // does in the moderation queue, and two formatters would eventually disagree.
 import { formatAverage } from "@/lib/ratings/rating-policy";
+import { cn } from "@/lib/utils";
 
 /**
  * The Campus Admin dashboard (PRD §65–68).
@@ -22,38 +21,25 @@ import { formatAverage } from "@/lib/ratings/rating-policy";
  * delivery success rate is 0%.
  */
 
-function MetricCard({
-  label,
-  value,
-  hint,
-  change,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  change?: number | null;
-}) {
+/**
+ * Period-over-period movement.
+ *
+ * Direction is carried by an arrow as well as by colour, so the signal survives
+ * both colour blindness and a greyscale print of the page.
+ */
+function Delta({ change }: { change: number | null }) {
+  if (change === null) {
+    return <span className="text-xs text-ink-3">No prior period</span>;
+  }
+
+  const tone =
+    change > 0 ? "text-success" : change < 0 ? "text-danger" : "text-ink-3";
+  const arrow = change > 0 ? "↑" : change < 0 ? "↓" : "→";
+
   return (
-    <div className="rounded-lg border border-current/10 p-3">
-      <p className="text-xs uppercase tracking-wide opacity-60">{label}</p>
-      <p className="mt-1 text-lg font-semibold tabular-nums">{value}</p>
-      {change !== undefined && (
-        <p
-          className={
-            change === null
-              ? "text-xs opacity-50"
-              : change > 0
-                ? "text-xs text-green-700 dark:text-green-400"
-                : change < 0
-                  ? "text-xs text-red-700 dark:text-red-400"
-                  : "text-xs opacity-60"
-          }
-        >
-          {change === null ? "No prior period" : `${formatChange(change)} vs previous`}
-        </p>
-      )}
-      {hint && <p className="mt-0.5 text-xs opacity-60">{hint}</p>}
-    </div>
+    <span className={cn("text-xs font-medium tabular-nums", tone)}>
+      {arrow} {formatChange(change)} vs previous
+    </span>
   );
 }
 
@@ -69,14 +55,19 @@ function formatSignedKobo(value: number): string {
   return value < 0 ? `−${formatKobo(-value)}` : formatKobo(value);
 }
 
-function Section({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
+function Section({
+  title,
+  note,
+  children,
+}: {
+  title: string;
+  note?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <section className="space-y-3">
-      <div className="space-y-0.5">
-        <h2 className="text-sm font-semibold uppercase tracking-wide opacity-70">{title}</h2>
-        {note && <p className="text-xs opacity-60">{note}</p>}
-      </div>
-      {children}
+    <section>
+      <SectionHeader title={title} description={note} />
+      <div className="space-y-3">{children}</div>
     </section>
   );
 }
@@ -88,37 +79,86 @@ function Section({ title, note, children }: { title: string; note?: string; chil
  * comparison within the period rather than an absolute claim. Every bar keeps a
  * visible minimum height: a day with one order must not look identical to a day with
  * none, because those are different operational facts.
+ *
+ * The figures also exist as a real table, visually hidden. `title` tooltips were the
+ * only way to read a bar before, which is no way at all on a touch screen or with a
+ * screen reader — and this is a phone-first audience.
  */
 function DailyTrend({ daily }: { daily: CampusDashboard["daily"] }) {
   const peak = daily.reduce((max, point) => Math.max(max, point.orders), 0);
+  const total = daily.reduce((sum, point) => sum + point.orders, 0);
 
   if (peak === 0) {
-    return <p className="text-sm opacity-60">No orders were placed in this period.</p>;
+    return (
+      <Card className="text-sm text-muted">No orders were placed in this period.</Card>
+    );
   }
 
   return (
-    <div>
-      <div className="flex h-24 items-end gap-px" role="img" aria-label="Orders per day">
+    <Card className="space-y-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-ink-3">Orders per day</p>
+          <p className="font-mono text-2xl font-semibold tabular-nums text-ink">{total}</p>
+        </div>
+        <p className="text-xs text-muted">
+          Peak <span className="font-mono tabular-nums">{peak}</span>/day
+        </p>
+      </div>
+
+      <div className="flex h-24 items-end gap-px" aria-hidden="true">
         {daily.map((point) => (
           <div
             key={point.day}
-            className="flex-1 rounded-t bg-current/20"
-            style={{ height: `${point.orders === 0 ? 2 : Math.max(6, (point.orders / peak) * 100)}%` }}
-            // The chart is decorative; the numbers a screen reader needs are in the
-            // cards above and the table below, so this only needs a hover label.
+            className={cn(
+              "flex-1 rounded-t transition-[height]",
+              point.orders === 0 ? "bg-rule" : "bg-brand-600",
+            )}
+            style={{
+              height: `${point.orders === 0 ? 2 : Math.max(6, (point.orders / peak) * 100)}%`,
+            }}
             title={`${point.day}: ${point.orders} order${point.orders === 1 ? "" : "s"}, ${formatKobo(point.goodsKobo)}`}
           />
         ))}
       </div>
-      <div className="mt-1 flex justify-between text-xs opacity-60">
-        <span>{daily[0]?.day}</span>
-        <span>Peak {peak}/day</span>
-        <span>{daily[daily.length - 1]?.day}</span>
+
+      <div className="flex justify-between text-xs text-ink-3">
+        <span className="font-mono">{daily[0]?.day}</span>
+        <span className="font-mono">{daily[daily.length - 1]?.day}</span>
       </div>
-    </div>
+
+      <table className="sr-only">
+        <caption>Orders and value per day</caption>
+        <thead>
+          <tr>
+            <th scope="col">Day</th>
+            <th scope="col">Orders</th>
+            <th scope="col">Goods sold</th>
+          </tr>
+        </thead>
+        <tbody>
+          {daily.map((point) => (
+            <tr key={point.day}>
+              <th scope="row">{point.day}</th>
+              <td>{point.orders}</td>
+              <td>{formatKobo(point.goodsKobo)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </Card>
   );
 }
 
+/**
+ * Leaderboards stay real tables — §19 asks for tables where tables are
+ * appropriate, and this is ranked, columnar, comparable data.
+ *
+ * Wide tables scroll inside their own region rather than stretching the page: a
+ * five-column agent table cannot fit 320px at a legible size, and a contained
+ * scroller is the honest answer. The region is focusable with an accessible name
+ * so it can also be scrolled by keyboard.
+ */
 function LeaderboardTable({
   caption,
   columns,
@@ -127,38 +167,58 @@ function LeaderboardTable({
 }: {
   caption: string;
   columns: string[];
-  rows: { key: string; cells: string[] }[];
+  rows: { key: string; cells: React.ReactNode[] }[];
   empty: string;
 }) {
-  if (rows.length === 0) return <p className="text-sm opacity-60">{empty}</p>;
+  if (rows.length === 0) return <Card className="text-sm text-muted">{empty}</Card>;
+
+  const wide = columns.length >= 4;
 
   return (
-    <table className="w-full text-sm">
-      <caption className="sr-only">{caption}</caption>
-      <thead>
-        <tr className="text-left text-xs uppercase tracking-wide opacity-60">
-          {columns.map((column, index) => (
-            <th key={column} scope="col" className={index === 0 ? "py-1" : "py-1 text-right"}>
-              {column}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.key} className="border-t border-current/10">
-            {row.cells.map((cell, index) => (
-              <td
-                key={`${row.key}-${index}`}
-                className={index === 0 ? "py-1.5" : "py-1.5 text-right tabular-nums"}
-              >
-                {cell}
-              </td>
+    <Card className="p-0">
+      <div
+        className="overflow-x-auto rounded-card"
+        role="region"
+        aria-label={caption}
+        tabIndex={0}
+      >
+        <table className={cn("w-full text-sm", wide && "min-w-[34rem]")}>
+          <caption className="sr-only">{caption}</caption>
+          <thead>
+            <tr className="border-b border-rule text-left text-xs uppercase tracking-wide text-ink-3">
+              {columns.map((column, index) => (
+                <th
+                  key={column}
+                  scope="col"
+                  className={cn("px-4 py-2.5 font-medium", index > 0 && "text-right")}
+                >
+                  {column}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key} className="border-b border-rule/60 last:border-0">
+                {row.cells.map((cell, index) => (
+                  <td
+                    key={`${row.key}-${index}`}
+                    className={cn(
+                      "px-4 py-3",
+                      index === 0
+                        ? "font-medium text-ink"
+                        : "whitespace-nowrap text-right font-mono tabular-nums text-ink-2",
+                    )}
+                  >
+                    {cell}
+                  </td>
+                ))}
+              </tr>
             ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }
 
@@ -171,34 +231,39 @@ export function AnalyticsDashboard({ dashboard }: { dashboard: CampusDashboard }
         title="Trade"
         note="Orders are counted when placed. Value is counted only once an order completes, because a cancelled order earned nothing."
       >
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Stat
             label="Orders placed"
-            value={orders.placed.value.toLocaleString()}
-            change={orders.placed.change}
+            value={orders.placed.value.toLocaleString("en-NG")}
+            hint={<Delta change={orders.placed.change} />}
           />
-          <MetricCard
+          <Stat
             label="Completed"
-            value={orders.completed.toLocaleString()}
+            value={orders.completed.toLocaleString("en-NG")}
             hint={
               orders.completionRate === null
                 ? "No orders to measure yet"
                 : `${formatRate(orders.completionRate)} of orders placed`
             }
           />
-          <MetricCard
+          <Stat
             label="Goods sold"
             value={formatKobo(revenue.goodsKobo)}
-            change={revenue.goods.change}
+            hint={<Delta change={revenue.goods.change} />}
+            tone="brand"
           />
-          <MetricCard
+          <Stat
             label="Average order"
             value={
               orders.averageOrderValueKobo === null
                 ? "—"
                 : formatKobo(orders.averageOrderValueKobo)
             }
-            hint={orders.averageOrderValueKobo === null ? "No completed orders yet" : "Completed orders only"}
+            hint={
+              orders.averageOrderValueKobo === null
+                ? "No completed orders yet"
+                : "Completed orders only"
+            }
           />
         </div>
         <DailyTrend daily={dashboard.daily} />
@@ -208,21 +273,29 @@ export function AnalyticsDashboard({ dashboard }: { dashboard: CampusDashboard }
         title="Platform earnings"
         note="Commission plus delivery fees, less the platform's own share of refunds. A vendor's share of a refund is the vendor's loss, not the platform's."
       >
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard label="Commission" value={formatKobo(revenue.commissionKobo)} />
-          <MetricCard label="Delivery fees" value={formatKobo(revenue.deliveryFeesKobo)} hint="Captured payments" />
-          <MetricCard
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Stat label="Commission" value={formatKobo(revenue.commissionKobo)} />
+          <Stat
+            label="Delivery fees"
+            value={formatKobo(revenue.deliveryFeesKobo)}
+            hint="Captured payments"
+          />
+          <Stat
             label="Refunded (platform)"
             value={formatKobo(revenue.refundedFromPlatformKobo)}
           />
-          <MetricCard
+          <Stat
             label="Net to platform"
             value={formatSignedKobo(revenue.netPlatformKobo)}
-            hint={revenue.netPlatformKobo < 0 ? "Refunds exceeded earnings this period" : undefined}
+            tone={revenue.netPlatformKobo < 0 ? "danger" : "success"}
+            hint={
+              revenue.netPlatformKobo < 0 ? "Refunds exceeded earnings this period" : undefined
+            }
           />
         </div>
-        <p className="text-xs opacity-60">
-          Owed to vendors for the same period: {formatKobo(revenue.vendorPayoutKobo)}.
+        <p className="text-xs text-muted">
+          Owed to vendors for the same period:{" "}
+          <span className="font-mono tabular-nums">{formatKobo(revenue.vendorPayoutKobo)}</span>.
         </p>
       </Section>
 
@@ -230,9 +303,9 @@ export function AnalyticsDashboard({ dashboard }: { dashboard: CampusDashboard }
         title="Delivery"
         note="Times are medians, not averages: one parcel left overnight should not describe everyone else's afternoon."
       >
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard label="Deliveries created" value={deliveries.created.toLocaleString()} />
-          <MetricCard
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Stat label="Deliveries created" value={deliveries.created.toLocaleString("en-NG")} />
+          <Stat
             label="Success rate"
             value={formatRate(deliveries.successRate)}
             hint={
@@ -241,12 +314,16 @@ export function AnalyticsDashboard({ dashboard }: { dashboard: CampusDashboard }
                 : `${deliveries.completed} completed, ${deliveries.returned} returned, ${deliveries.cancelled} cancelled`
             }
           />
-          <MetricCard
+          <Stat
             label="Typical wait for an agent"
             value={formatDurationMs(deliveries.medianPoolWaitMs)}
-            hint={deliveries.medianPoolWaitMs === null ? "Nothing has been accepted yet" : "Pooled to accepted"}
+            hint={
+              deliveries.medianPoolWaitMs === null
+                ? "Nothing has been accepted yet"
+                : "Pooled to accepted"
+            }
           />
-          <MetricCard
+          <Stat
             label="Typical delivery time"
             value={formatDurationMs(deliveries.medianAcceptToCompleteMs)}
             hint={
@@ -258,42 +335,59 @@ export function AnalyticsDashboard({ dashboard }: { dashboard: CampusDashboard }
         </div>
       </Section>
 
-      <Section title="Trust" note="A rising dispute rate is the earliest warning that something on the campus is wrong.">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <MetricCard label="Disputes filed" value={disputes.filed.toLocaleString()} />
-          <MetricCard
+      <Section
+        title="Trust"
+        note="A rising dispute rate is the earliest warning that something on the campus is wrong."
+      >
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Stat label="Disputes filed" value={disputes.filed.toLocaleString("en-NG")} />
+          <Stat
             label="Open now"
-            value={disputes.live.toLocaleString()}
+            value={disputes.live.toLocaleString("en-NG")}
+            tone={disputes.live > 0 ? "warning" : "neutral"}
             hint="Awaiting your decision, regardless of date"
           />
-          <MetricCard
+          <Stat
             label="Dispute rate"
             value={formatRate(disputes.disputeRate, 2)}
-            hint={disputes.disputeRate === null ? "No completed store orders yet" : "Of completed store orders"}
+            hint={
+              disputes.disputeRate === null
+                ? "No completed store orders yet"
+                : "Of completed store orders"
+            }
           />
-          <MetricCard label="Refunded" value={formatKobo(disputes.refundedKobo)} hint="Total paid back to students" />
+          <Stat
+            label="Refunded"
+            value={formatKobo(disputes.refundedKobo)}
+            hint="Total paid back to students"
+          />
         </div>
       </Section>
 
-      <Section title="Who is here" note="Counted as of now, not over the period — this is a picture of today.">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          <MetricCard
+      <Section
+        title="Who is here"
+        note="Counted as of now, not over the period — this is a picture of today."
+      >
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+          <Stat
             label="Active vendors"
-            value={marketplace.activeVendors.toLocaleString()}
+            value={marketplace.activeVendors.toLocaleString("en-NG")}
+            tone={marketplace.pendingVendors > 0 ? "warning" : "neutral"}
             hint={
               marketplace.pendingVendors > 0
                 ? `${marketplace.pendingVendors} awaiting review`
                 : "None awaiting review"
             }
           />
-          <MetricCard
+          <Stat
             label="Agents on duty"
-            value={marketplace.onDutyAgents.toLocaleString()}
+            value={marketplace.onDutyAgents.toLocaleString("en-NG")}
             hint={`of ${marketplace.activeAgents} approved`}
           />
-          <MetricCard
+          <Stat
             label="Verified students"
-            value={marketplace.approvedStudents.toLocaleString()}
+            value={marketplace.approvedStudents.toLocaleString("en-NG")}
+            tone={marketplace.pendingStudents > 0 ? "warning" : "neutral"}
             hint={
               marketplace.pendingStudents > 0
                 ? `${marketplace.pendingStudents} awaiting review`
@@ -309,7 +403,11 @@ export function AnalyticsDashboard({ dashboard }: { dashboard: CampusDashboard }
           columns={["Store", "Orders", "Goods sold"]}
           rows={dashboard.topVendors.map((vendor) => ({
             key: vendor.vendorProfileId,
-            cells: [vendor.storeName, vendor.completedOrders.toLocaleString(), formatKobo(vendor.goodsKobo)],
+            cells: [
+              vendor.storeName,
+              vendor.completedOrders.toLocaleString("en-NG"),
+              formatKobo(vendor.goodsKobo),
+            ],
           }))}
           empty="No store completed an order in this period."
         />
@@ -321,19 +419,26 @@ export function AnalyticsDashboard({ dashboard }: { dashboard: CampusDashboard }
           columns={["Product", "Units", "Value"]}
           rows={dashboard.topProducts.map((product) => ({
             key: product.productId,
-            cells: [product.name, product.unitsSold.toLocaleString(), formatKobo(product.goodsKobo)],
+            cells: [
+              product.name,
+              product.unitsSold.toLocaleString("en-NG"),
+              formatKobo(product.goodsKobo),
+            ],
           }))}
           empty="Nothing was sold in this period."
         />
       </Section>
 
-      <Section title="Busiest destinations" note="Where deliveries actually go — the input to your pricing and pooling.">
+      <Section
+        title="Busiest destinations"
+        note="Where deliveries actually go — the input to your pricing and pooling."
+      >
         <LeaderboardTable
           caption="Delivery locations by volume"
           columns={["Location", "Deliveries"]}
           rows={dashboard.topLocations.map((location) => ({
             key: location.deliveryLocationId,
-            cells: [location.name, location.deliveries.toLocaleString()],
+            cells: [location.name, location.deliveries.toLocaleString("en-NG")],
           }))}
           empty="No deliveries were created in this period."
         />
@@ -351,14 +456,13 @@ export function AnalyticsDashboard({ dashboard }: { dashboard: CampusDashboard }
             cells: [
               // The two flags an admin must not have to hunt for: someone already
               // escalated under Rule 27, and someone who is not currently reachable.
-              [
-                agent.name,
-                agent.underReview ? "(under review)" : null,
-                agent.onDuty ? null : "(off duty)",
-              ]
-                .filter(Boolean)
-                .join(" "),
-              agent.completed.toLocaleString(),
+              // These were parenthetical text; as badges they survive a skim.
+              <span key="name" className="flex flex-wrap items-center gap-1.5">
+                <span>{agent.name}</span>
+                {agent.underReview ? <Badge tone="danger">Under review</Badge> : null}
+                {agent.onDuty ? null : <Badge tone="neutral">Off duty</Badge>}
+              </span>,
+              agent.completed.toLocaleString("en-NG"),
               agent.successRate === null
                 ? "—"
                 : `${formatRate(agent.successRate)}${agent.cancelled > 0 ? ` (${agent.cancelled} dropped)` : ""}`,
