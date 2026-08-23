@@ -1,8 +1,10 @@
 "use client";
 
 import * as React from "react";
+import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
+import { useIsHydrated } from "@/lib/hooks/browser";
 import { cn } from "@/lib/utils";
 
 /**
@@ -17,6 +19,14 @@ import { cn } from "@/lib/utils";
  *
  * What this handles that a hand-rolled overlay usually misses:
  *
+ *  • Rendered through a portal into `document.body`. This is not tidiness; it is
+ *    the difference between working and not. `position: fixed` resolves against
+ *    the viewport *only* while no ancestor has created a containing block, and
+ *    `backdrop-filter` creates one — as do `transform`, `filter` and `will-change`.
+ *    The account menu lives inside a `backdrop-blur` header, so `inset-0`
+ *    resolved against a 64px-tall strip and the sheet was clipped into it,
+ *    unusable. Escaping to `body` means no ancestor can ever do that again,
+ *    whatever styles a future header grows.
  *  • `position: fixed; inset: 0` on the container — never anchored to a trigger,
  *    so it cannot be pushed outside the viewport by its parent.
  *  • `max-height: 85dvh` with internal overflow — a long menu scrolls instead
@@ -116,10 +126,20 @@ export function Sheet({
   const panelRef = useOverlayBehaviour(open, onClose);
   const titleId = React.useId();
   const descriptionId = React.useId();
+  const isHydrated = useIsHydrated();
 
   if (!open) return null;
 
-  return (
+  /*
+   * `createPortal` needs a real `document.body`, which does not exist while
+   * rendering on the server. Gating on the hydration flag rather than on
+   * `typeof document` keeps the server and client agreeing about the first
+   * render, which is what avoids a hydration mismatch. Nothing is lost: a sheet
+   * is only ever opened by a tap, which cannot happen before hydration.
+   */
+  if (!isHydrated) return null;
+
+  const overlay = (
     <div className="fixed inset-0 z-50 flex" role="presentation">
       <button
         type="button"
@@ -201,6 +221,8 @@ export function Sheet({
       </div>
     </div>
   );
+
+  return createPortal(overlay, document.body);
 }
 
 /**

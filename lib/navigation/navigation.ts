@@ -1,4 +1,5 @@
 import type { UserRole, VerificationStatus } from "@/lib/generated/prisma/enums";
+import { canReach, type Visitor } from "@/lib/navigation/routes";
 
 /**
  * The navigation model (pure).
@@ -18,13 +19,24 @@ import type { UserRole, VerificationStatus } from "@/lib/generated/prisma/enums"
  * The rule the whole module obeys: **never offer a destination that will turn the
  * person away.** A link that answers "you cannot be here" is worse than no link,
  * because the reader cannot tell whether they are forbidden or the app is broken.
- * That is why an unverified student is offered verification instead of a cart the
- * checkout would refuse.
+ *
+ * That rule used to be enforced by hand, and it failed twice — a vendor was sent
+ * into a redirect loop at `/student/onboarding`, and a Super Admin was offered two
+ * Campus-Admin-only queues that bounced straight back to Campuses. So it is now
+ * enforced mechanically: every item is filtered through `canReach` (see
+ * `routes.ts`) before it is offered, so a link that would bounce cannot be drawn
+ * even if a future branch tries to add one.
  */
 
 /** What the current person can actually do, resolved from the database. */
 export type Capabilities = {
   role: UserRole;
+  /**
+   * Whether this account belongs to a campus. A Super Admin belongs to none, and
+   * every campus-scoped page redirects a visitor without one — so this is part of
+   * "can they reach it", not decoration.
+   */
+  hasCampus: boolean;
   /** Verified student on an active campus: the gate for buying anything. */
   isVerifiedStudent: boolean;
   /** `NO_APPLICATION` is distinct from `REJECTED`: one invites, one explains. */
@@ -72,11 +84,17 @@ const GET_VERIFIED: NavItem = {
   hint: "Submit your matric number and ID to start shopping",
 };
 
+const NOTIFICATIONS: NavItem = {
+  href: "/notifications",
+  label: "Notifications",
+  hint: "Everything you have been told",
+};
+
 /*
- * Admin destinations are named rather than reached by index. The four that
- * appear in the bottom bar are referenced by name below, so reordering this list
- * changes the menu order and nothing else — indexing would have let a reorder
- * silently swap which screens a Campus Admin gets one tap away.
+ * Admin destinations are named rather than reached by index. The ones that appear
+ * in the bottom bar are referenced by name below, so reordering this list changes
+ * the menu order and nothing else — indexing would have let a reorder silently
+ * swap which screens an admin gets one tap away.
  */
 const ADMIN_ANALYTICS: NavItem = {
   href: "/admin/analytics",
@@ -98,14 +116,29 @@ const ADMIN_DISPUTES: NavItem = {
   label: "Disputes",
   hint: "Decide refunds",
 };
+const ADMIN_AGENTS: NavItem = {
+  href: "/admin/agents",
+  label: "Agents",
+  hint: "Review and escalate couriers",
+};
+const ADMIN_RATINGS: NavItem = {
+  href: "/admin/ratings",
+  label: "Reviews",
+  hint: "Moderate ratings",
+};
+const CAMPUSES: NavItem = {
+  href: "/super-admin/campuses",
+  label: "Campuses",
+  hint: "Create campuses and assign admins",
+};
 
 const ADMIN_ITEMS: NavItem[] = [
   ADMIN_ANALYTICS,
   ADMIN_STUDENTS,
   ADMIN_VENDORS,
-  { href: "/admin/agents", label: "Agents", hint: "Review and escalate couriers" },
+  ADMIN_AGENTS,
   ADMIN_DISPUTES,
-  { href: "/admin/ratings", label: "Reviews", hint: "Moderate ratings" },
+  ADMIN_RATINGS,
   {
     href: "/admin/delivery-locations",
     label: "Delivery locations",
@@ -156,10 +189,42 @@ function cartItem(caps: Capabilities): NavItem {
 }
 
 /**
+ * The operating destinations for someone whose account *is* a store.
+ *
+ * A `VENDOR` is not a student who also sells; the role means selling is the job
+ * they signed in to do, so the work comes first and shopping (if they are also a
+ * verified student) is secondary. Before this branch existed, a vendor fell
+ * through to the "unverified student" case and was sent to student onboarding,
+ * which refuses non-students — the redirect loop that made the deployed app
+ * unusable for every vendor.
+ */
+function vendorWorkItems(caps: Capabilities): NavItem[] {
+  if (caps.vendorStatus === "APPROVED") {
+    return [
+      { href: "/vendor/orders", label: "Orders", hint: "Prepare and hand over" },
+      { href: "/vendor/products", label: "Products", hint: "Prices, stock and photos" },
+      { href: "/vendor/store", label: "Store", hint: "Hours, location and status" },
+    ];
+  }
+
+  // Not yet approved: the only useful screen is the application itself. Offering
+  // Orders and Products to a store that cannot trade is four taps to an empty
+  // page.
+  const hint =
+    caps.vendorStatus === "PENDING_VERIFICATION"
+      ? "Your application is under review"
+      : caps.vendorStatus === "NO_APPLICATION"
+        ? "Finish your store application"
+        : "Your store needs attention";
+
+  return [{ href: "/vendor/store", label: "Store", hint }];
+}
+
+/**
  * Builds the navigation for one person.
  *
  * Roles are additive on purpose. A Campus Admin is also a person who may have a
- * cart, and a vendor is a student who sells; collapsing each account to a single
+ * cart, and a student may sell and deliver; collapsing each account to a single
  * role is what produced five shells that each hid most of the app.
  */
 export function buildNavigation(caps: Capabilities): Navigation {
@@ -171,44 +236,91 @@ export function buildNavigation(caps: Capabilities): Navigation {
   // Administration leads for an admin: it is the job they signed in to do.
   if (isAdmin) {
     if (caps.role === "SUPER_ADMIN") {
-      primary.push({
-        href: "/super-admin/campuses",
-        label: "Campuses",
-        hint: "Create campuses and assign admins",
-      });
+      /*
+       * A Super Admin gets the platform-wide screens only. Students and Vendors
+       * are deliberately absent: those two queues are a *campus* admin's work and
+       * their pages reject a Super Admin, so offering them produced two tabs that
+       * silently bounced back to Campuses. Disputes, Agents and Ratings all accept
+       * either admin role, so they are genuinely shared.
+       */
+      primary.push(CAMPUSES, ADMIN_ANALYTICS, ADMIN_DISPUTES, ADMIN_AGENTS);
+    } else {
+      primary.push(ADMIN_ANALYTICS, ADMIN_STUDENTS, ADMIN_VENDORS, ADMIN_DISPUTES);
     }
-    primary.push(ADMIN_ANALYTICS, ADMIN_STUDENTS, ADMIN_VENDORS, ADMIN_DISPUTES);
     groups.push({ title: "Administration", items: ADMIN_ITEMS });
   }
 
-  if (canShop(caps)) {
-    // An admin's own shopping is real but secondary; a student's is the point.
-    if (isAdmin) {
-      groups.push({ title: "Shopping", items: [SHOP, cartItem(caps), ORDERS] });
-    } else {
+  if (caps.role === "VENDOR") {
+    const work = vendorWorkItems(caps);
+    primary.push(...work);
+    groups.push({ title: "Your store", items: work });
+
+    // A vendor browsing the marketplace is reasonable; a vendor checking out is
+    // only possible if they are also a verified student, so the cart is gated on
+    // that rather than on the role.
+    const shopping: NavItem[] = canShop(caps) ? [SHOP, cartItem(caps), ORDERS] : [SHOP];
+    groups.push({ title: "Shopping", items: shopping });
+  }
+
+  if (caps.role === "DELIVERY_AGENT") {
+    const work = deliveringItem(caps);
+    primary.push(work);
+    groups.push({ title: "Your deliveries", items: [work] });
+
+    const shopping: NavItem[] = canShop(caps) ? [SHOP, cartItem(caps), ORDERS] : [SHOP];
+    groups.push({ title: "Shopping", items: shopping });
+  }
+
+  if (caps.role === "STUDENT") {
+    if (canShop(caps)) {
       primary.push(SHOP, cartItem(caps), ORDERS);
 
       const selling = sellingItem(caps);
       const delivering = deliveringItem(caps);
       primary.push(selling, delivering);
       groups.push({ title: "Earning", items: [selling, delivering] });
+    } else {
+      // Not verified: one honest destination, plus the marketplace to look around.
+      primary.push(GET_VERIFIED, SHOP);
     }
-  } else if (!isAdmin) {
-    // Not verified: one honest destination, plus the marketplace to look around.
-    primary.push(GET_VERIFIED, SHOP);
+  }
+
+  if (isAdmin && canShop(caps)) {
+    // An admin's own shopping is real but secondary; a student's is the point.
+    groups.push({ title: "Shopping", items: [SHOP, cartItem(caps), ORDERS] });
   }
 
   groups.push({
     title: "Account",
     items: [
-      { href: "/notifications", label: "Notifications", hint: "Everything you have been told" },
-      ...(caps.role === "STUDENT" || caps.isVerifiedStudent
+      NOTIFICATIONS,
+      // Only a student has a student verification record to look at. The role
+      // check matters more than it appears: this exact item, offered to a vendor,
+      // was one half of the redirect loop.
+      ...(caps.role === "STUDENT"
         ? [{ href: "/student/onboarding", label: "Verification", hint: "Your student status" }]
         : []),
     ],
   });
 
-  return { primary: primary.slice(0, PRIMARY_LIMIT), groups };
+  /*
+   * The safety net. Everything above expresses intent; this enforces the module's
+   * one rule against the actual guards in `routes.ts`. Filtering here rather than
+   * in each branch means a destination added later is checked automatically, and
+   * `primary` is sliced *after* filtering so an unreachable item cannot consume
+   * one of the five bottom-bar slots.
+   */
+  const visitor: Visitor = { role: caps.role, hasCampus: caps.hasCampus };
+  const reachable = (item: NavItem) => canReach(visitor, item.href);
+
+  return {
+    primary: primary.filter(reachable).slice(0, PRIMARY_LIMIT),
+    groups: groups
+      .map((group) => ({ ...group, items: group.items.filter(reachable) }))
+      // A group whose every item was filtered out would render as a heading with
+      // nothing under it, which reads as a loading failure.
+      .filter((group) => group.items.length > 0),
+  };
 }
 
 /**
@@ -217,10 +329,15 @@ export function buildNavigation(caps: Capabilities): Navigation {
  * Shared by the post-sign-in router and the home page so the two can never
  * disagree about where "home" is. It returns the first primary destination,
  * which is why `buildNavigation` puts the most important thing first.
+ *
+ * Because `buildNavigation` now filters unreachable items, this can only return a
+ * page that will admit the visitor. The `/notifications` fallback is the one
+ * destination that asks nothing of anyone beyond being signed in, so it is always
+ * a safe landing — never a loop.
  */
 export function homeHref(caps: Capabilities): string {
   const nav = buildNavigation(caps);
-  return nav.primary[0]?.href ?? "/notifications";
+  return nav.primary[0]?.href ?? NOTIFICATIONS.href;
 }
 
 /**

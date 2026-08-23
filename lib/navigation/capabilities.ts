@@ -43,6 +43,13 @@ export async function resolveShellContext(actor: Actor): Promise<ShellContext> {
     capabilities: {
       role: actor.role,
       /*
+       * Taken from the actor rather than from `row.campus`, because it must mean
+       * exactly what the page guards mean. Those guards test `actor.campusId`, so
+       * anything else here would let navigation and the guards disagree — which is
+       * the disagreement that produced the redirect loops in the first place.
+       */
+      hasCampus: Boolean(actor.campusId),
+      /*
        * Buying requires an approved student profile *and* a campus. The campus
        * check is not redundant: a Super Admin has no campus, and a campus-less
        * account has no marketplace to shop in, so offering it a cart would be a

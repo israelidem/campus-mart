@@ -367,6 +367,73 @@ been built (§6). Forgot-password is genuinely absent: no route, and Better Auth
 
 ---
 
+## 7d. Four more production bugs, found by walking the deployed app
+
+The previous rounds were found by building. These were found by *using* what was
+built — signing in as each role and clicking. That distinction is the point of
+§29: all four routes existed and all four components rendered.
+
+### Two redirect loops that made whole roles unusable (critical)
+
+Signing in as a Super Admin bounced between `/after-sign-in` and `/` until the
+browser gave up. The cause was that two different pieces of code each held their
+own opinion about where a user belongs: `after-sign-in` computed a landing route
+from the session, and the target page independently decided the visitor did not
+belong there and sent them back. Neither was wrong on its own; they simply did
+not agree, and nothing in the codebase said which should win.
+
+Fixed by making reachability a single derived fact rather than a decision spread
+across pages. `lib/navigation/routes.ts` now declares, per route prefix, what a
+visitor needs in order to be there, and exposes `canReach(visitor, path)`.
+Redirect targets are computed from the same table that guards the destination, so
+a landing route that would immediately bounce cannot be produced by construction.
+
+The regression test enumerates the full cross-product of visitor shapes against
+every declared route and asserts that following redirects terminates. That is
+what catches a loop; asserting on one hand-picked role would not have caught this
+one, because each role's *individual* redirect looked correct.
+
+### The mobile account menu could not be closed on a phone (§6)
+
+The sheet rendered inside a `position: sticky` header, so it was clipped by the
+header's bounds — on a 375px viewport the close control sat outside the visible
+area. Fixed by portalling the sheet to `document.body`, which is also what makes
+`100dvh` and `env(safe-area-inset-bottom)` mean what they say. The trigger keeps
+its `aria-expanded`/`aria-controls` relationship with the panel across the
+portal boundary, so the semantics survive the move.
+
+### Every document upload 500'd in production (critical)
+
+Uploads worked locally and failed on Vercel for every student and vendor. The
+storage layer only ever had a local-filesystem driver — the R2 variables in
+`.env.example` described an integration that was never written — and the
+serverless filesystem is read-only, so `writeFile` threw `EROFS` inside the
+upload handler. This is the clearest example in the project of "the route exists"
+being worthless: the form submitted, the request arrived, and the user got an
+opaque error.
+
+Fixed with a real second driver rather than a patch. `BlobDocumentStorage` sits
+behind the existing `DocumentStorage` interface, so no service or route changed.
+Three decisions worth recording:
+
+- **`access: "private"` on every object.** These are matriculation cards and
+  government ID. Reads go through `blobGet` server-side *after* the route has
+  authorised the viewer; no blob URL is ever handed to a browser.
+- **The sniffed MIME type is stored and served, never the declared one.** The new
+  driver sniffs on write and again on read, mirroring the local driver, so a
+  stored value cannot dictate a later `Content-Type`. The two drivers are kept
+  adjacent in the file specifically so this can be checked by eye.
+- **The local driver now refuses to start on Vercel** instead of failing once per
+  request. Same underlying condition, but it surfaces as a sentence naming the
+  fix rather than as a mystery 500 in a user's face.
+
+Driver selection is inferred from `BLOB_READ_WRITE_TOKEN`, which Vercel injects
+when a Blob store is attached. `npm run dev` needs no account and a deployment
+needs no configuration; `STORAGE_PROVIDER` overrides the inference when someone
+wants to test against a real store locally.
+
+---
+
 ## 8. Remaining issues — this work is NOT finished
 
 Stating this plainly, because §34 and §35 forbid a false completion claim.
@@ -417,10 +484,34 @@ Priorities 1–3 are done. **Priorities 4–9 are outstanding.**
     `Chicken & Chips` and `Egusi`. `scripts/verify-routes.ts` reports data depth
     and route status together so this stays a one-command check.
 
+11. **Super-admin campuses and campus analytics are still unstyled.** Both
+    render real data and both are reachable, but they predate the design system:
+    `components/super-admin/campus-manager.tsx` is a bare form-and-list, and
+    `components/admin/analytics-dashboard.tsx` prints figures as text where §19
+    asks for charts. Untouched deliberately — see the note below.
+12. **Student profile/verification status is thin** (§15 overlaps). The pending
+    state is communicated but not designed.
+13. **Blob storage has not been exercised against a real store.** The driver is
+    type-checked and the local path is unchanged and still green, but nothing has
+    yet uploaded a byte to Vercel Blob. First deploy with a store attached must
+    verify: upload a matriculation card, view it as an admin, confirm the
+    response `Content-Type` is the sniffed type, and confirm a signed-out request
+    for the same document is refused.
+
+### Why I stopped here rather than continuing
+
+Items 11 and 12 are the next work, and I did not start them. Rewriting the
+analytics dashboard is a ~400-line change, and beginning it with the context I
+had left would most likely have produced a half-converted file — worse than an
+unstyled one that works, because it would look finished. The four bugs in §7d
+were each verified before being written down; I would rather hand over three
+honest items than a fourth that claims more than it did.
+
 ### Suggested next step
 
-Re-skin cart, checkout and invoice, so the second half of the
-`Discover → Shop → Checkout → Receive` spine matches the first. After that, the
-§25 visual pass at 320/375/390/430px — item 9 above is the last thing standing
-between this and a defensible launch claim, and it needs a real device or an
-emulator rather than more reasoning.
+Deploy with a Blob store attached and clear item 13 — it is the only outstanding
+item that can still lose user data, and it needs the real service. Then re-skin
+cart, checkout and invoice so the second half of the
+`Discover → Shop → Checkout → Receive` spine matches the first, then items 11–12,
+and finally the §25 visual pass at 320/375/390/430px, which needs a real device
+or emulator rather than more reasoning.
